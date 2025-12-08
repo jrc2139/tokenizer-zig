@@ -15,6 +15,7 @@ pub const WordPiece = struct {
     unk_token: []const u8,
     continuing_subword_prefix: []const u8,
     max_input_chars_per_word: usize,
+    owns_strings: bool, // Whether we own unk_token and continuing_subword_prefix
 
     const Self = @This();
 
@@ -24,6 +25,7 @@ pub const WordPiece = struct {
         max_input_chars_per_word: usize = 100,
     };
 
+    /// Initialize with borrowed strings (caller retains ownership)
     pub fn init(allocator: std.mem.Allocator, vocab: std.StringHashMapUnmanaged(u32), config: Config) !Self {
         // Build reverse vocab
         var vocab_r = std.AutoHashMapUnmanaged(u32, []const u8){};
@@ -39,10 +41,43 @@ pub const WordPiece = struct {
             .unk_token = config.unk_token,
             .continuing_subword_prefix = config.continuing_subword_prefix,
             .max_input_chars_per_word = config.max_input_chars_per_word,
+            .owns_strings = false,
+        };
+    }
+
+    /// Initialize with owned strings (WordPiece takes ownership and frees on deinit)
+    pub fn initOwned(
+        allocator: std.mem.Allocator,
+        vocab: std.StringHashMapUnmanaged(u32),
+        unk_token: []const u8,
+        prefix: []const u8,
+        max_chars: usize,
+    ) !Self {
+        // Build reverse vocab
+        var vocab_r = std.AutoHashMapUnmanaged(u32, []const u8){};
+        var it = vocab.iterator();
+        while (it.next()) |entry| {
+            try vocab_r.put(allocator, entry.value_ptr.*, entry.key_ptr.*);
+        }
+
+        return .{
+            .allocator = allocator,
+            .vocab = vocab,
+            .vocab_r = vocab_r,
+            .unk_token = unk_token,
+            .continuing_subword_prefix = prefix,
+            .max_input_chars_per_word = max_chars,
+            .owns_strings = true,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        // Free owned config strings
+        if (self.owns_strings) {
+            self.allocator.free(self.unk_token);
+            self.allocator.free(self.continuing_subword_prefix);
+        }
+
         // Free vocab keys (strings)
         var it = self.vocab.iterator();
         while (it.next()) |entry| {

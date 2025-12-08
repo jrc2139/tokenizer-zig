@@ -4,8 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Library module
-    const tokenizer_mod = b.createModule(.{
+    // Library module - export for external use
+    const tokenizer_mod = b.addModule("tokenizer", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,

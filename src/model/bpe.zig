@@ -32,6 +32,7 @@ pub const BPE = struct {
     continuing_subword_prefix: ?[]const u8,
     end_of_word_suffix: ?[]const u8,
     dropout: ?f32,
+    owns_strings: bool, // Whether we own the config strings
 
     const Self = @This();
 
@@ -42,6 +43,7 @@ pub const BPE = struct {
         dropout: ?f32 = null,
     };
 
+    /// Initialize with borrowed strings (caller retains ownership)
     pub fn init(
         allocator: std.mem.Allocator,
         vocab: std.StringHashMapUnmanaged(u32),
@@ -64,10 +66,47 @@ pub const BPE = struct {
             .continuing_subword_prefix = config.continuing_subword_prefix,
             .end_of_word_suffix = config.end_of_word_suffix,
             .dropout = config.dropout,
+            .owns_strings = false,
+        };
+    }
+
+    /// Initialize with owned strings (BPE takes ownership and frees on deinit)
+    pub fn initOwned(
+        allocator: std.mem.Allocator,
+        vocab: std.StringHashMapUnmanaged(u32),
+        merges: std.AutoHashMapUnmanaged(u64, PairVal),
+        unk_token: ?[]const u8,
+        prefix: ?[]const u8,
+        suffix: ?[]const u8,
+    ) !Self {
+        // Build reverse vocab
+        var vocab_r = std.AutoHashMapUnmanaged(u32, []const u8){};
+        var it = vocab.iterator();
+        while (it.next()) |entry| {
+            try vocab_r.put(allocator, entry.value_ptr.*, entry.key_ptr.*);
+        }
+
+        return .{
+            .allocator = allocator,
+            .vocab = vocab,
+            .vocab_r = vocab_r,
+            .merges = merges,
+            .unk_token = unk_token,
+            .continuing_subword_prefix = prefix,
+            .end_of_word_suffix = suffix,
+            .dropout = null,
+            .owns_strings = true,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        // Free owned config strings
+        if (self.owns_strings) {
+            if (self.unk_token) |s| self.allocator.free(s);
+            if (self.continuing_subword_prefix) |s| self.allocator.free(s);
+            if (self.end_of_word_suffix) |s| self.allocator.free(s);
+        }
+
         var it = self.vocab.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -138,20 +177,26 @@ pub const BPE = struct {
         while (iter.nextCodepointSlice()) |char_slice| {
             // TODO: Add prefix/suffix handling when needed
             const char_str = char_slice;
+            const char_len: u32 = @intCast(char_slice.len);
 
             if (self.vocab.get(char_str)) |id| {
                 try word.append(allocator, id);
+                try char_offsets.append(allocator, .{
+                    .start = byte_idx,
+                    .end = byte_idx + char_len,
+                });
             } else if (self.unk_token) |unk| {
                 if (self.vocab.get(unk)) |unk_id| {
                     try word.append(allocator, unk_id);
+                    try char_offsets.append(allocator, .{
+                        .start = byte_idx,
+                        .end = byte_idx + char_len,
+                    });
                 }
+                // If unk_token exists but isn't in vocab, skip this character
             }
+            // If no vocab match and no unk_token, skip this character
 
-            const char_len: u32 = @intCast(char_slice.len);
-            try char_offsets.append(allocator, .{
-                .start = byte_idx,
-                .end = byte_idx + char_len,
-            });
             byte_idx += char_len;
         }
 

@@ -168,20 +168,22 @@ fn parseWordPieceModel(allocator: std.mem.Allocator, model_obj: std.json.ObjectM
         try vocab.put(allocator, key_copy, id);
     }
 
-    // Parse config options
-    const unk_token = getStringField(model_obj, "unk_token") orelse "[UNK]";
-    const prefix = getStringField(model_obj, "continuing_subword_prefix") orelse "##";
+    // Parse config options - must duplicate strings since JSON is freed after parsing
+    const unk_token_raw = getStringField(model_obj, "unk_token") orelse "[UNK]";
+    const prefix_raw = getStringField(model_obj, "continuing_subword_prefix") orelse "##";
     const max_chars: usize = if (model_obj.get("max_input_chars_per_word")) |v|
         if (v == .integer) @intCast(v.integer) else 100
     else
         100;
 
+    // Duplicate strings so they outlive the JSON parse
+    const unk_token = try allocator.dupe(u8, unk_token_raw);
+    errdefer allocator.free(unk_token);
+    const prefix = try allocator.dupe(u8, prefix_raw);
+    errdefer allocator.free(prefix);
+
     const wp_ptr = try allocator.create(wordpiece.WordPiece);
-    wp_ptr.* = try wordpiece.WordPiece.init(allocator, vocab, .{
-        .unk_token = unk_token,
-        .continuing_subword_prefix = prefix,
-        .max_input_chars_per_word = max_chars,
-    });
+    wp_ptr.* = try wordpiece.WordPiece.initOwned(allocator, vocab, unk_token, prefix, max_chars);
 
     return .{
         .model = wp_ptr.getModel(),
@@ -270,17 +272,21 @@ fn parseBPEModel(allocator: std.mem.Allocator, model_obj: std.json.ObjectMap) !M
         }
     }
 
-    // Parse config options
-    const unk_token = getStringField(model_obj, "unk_token");
-    const prefix = getStringField(model_obj, "continuing_subword_prefix");
-    const suffix = getStringField(model_obj, "end_of_word_suffix");
+    // Parse config options - must duplicate strings since JSON is freed after parsing
+    const unk_token_raw = getStringField(model_obj, "unk_token");
+    const prefix_raw = getStringField(model_obj, "continuing_subword_prefix");
+    const suffix_raw = getStringField(model_obj, "end_of_word_suffix");
+
+    // Duplicate strings so they outlive the JSON parse
+    const unk_token: ?[]const u8 = if (unk_token_raw) |s| try allocator.dupe(u8, s) else null;
+    errdefer if (unk_token) |s| allocator.free(s);
+    const prefix: ?[]const u8 = if (prefix_raw) |s| try allocator.dupe(u8, s) else null;
+    errdefer if (prefix) |s| allocator.free(s);
+    const suffix: ?[]const u8 = if (suffix_raw) |s| try allocator.dupe(u8, s) else null;
+    errdefer if (suffix) |s| allocator.free(s);
 
     const bpe_ptr = try allocator.create(bpe.BPE);
-    bpe_ptr.* = try bpe.BPE.init(allocator, vocab, merges, .{
-        .unk_token = unk_token,
-        .continuing_subword_prefix = prefix,
-        .end_of_word_suffix = suffix,
-    });
+    bpe_ptr.* = try bpe.BPE.initOwned(allocator, vocab, merges, unk_token, prefix, suffix);
 
     return .{
         .model = bpe_ptr.getModel(),
