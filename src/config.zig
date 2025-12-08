@@ -567,6 +567,22 @@ fn getBoolField(obj: std.json.ObjectMap, key: []const u8) ?bool {
     return null;
 }
 
+// ============================================================================
+// Unit Tests
+// ============================================================================
+
+/// Helper to cleanup config after tests
+fn cleanupConfig(config: *TokenizerConfig) void {
+    config.deinit();
+    // Clean up model - check type by testing if it's WordPiece or BPE
+    if (config.model_impl.deinit) |deinit_fn| {
+        deinit_fn(config.model_impl.ptr);
+    }
+    if (config.model_impl.destroy) |destroy_fn| {
+        destroy_fn(config.allocator, config.model_impl.ptr);
+    }
+}
+
 test "parse simple vocab" {
     const allocator = std.testing.allocator;
 
@@ -588,16 +604,417 @@ test "parse simple vocab" {
     ;
 
     var config = try loadConfig(allocator, json_content);
-    defer {
-        config.deinit();
-        // Clean up model
-        const wp_ptr: *wordpiece.WordPiece = @ptrCast(@alignCast(config.model_ptr));
-        wp_ptr.deinit();
-        allocator.destroy(wp_ptr);
-    }
+    defer cleanupConfig(&config);
 
     // Verify vocab loaded
     try std.testing.expectEqual(@as(usize, 4), config.model_impl.getVocabSize());
     try std.testing.expectEqual(@as(?u32, 0), config.model_impl.tokenToId("[PAD]"));
     try std.testing.expectEqual(@as(?u32, 2), config.model_impl.tokenToId("hello"));
+}
+
+test "config invalid json returns error" {
+    const allocator = std.testing.allocator;
+    const result = loadConfig(allocator, "not valid json {{{");
+    try std.testing.expectError(ConfigError.InvalidJson, result);
+}
+
+test "config missing model returns error" {
+    const allocator = std.testing.allocator;
+    const json_content =
+        \\{
+        \\  "version": "1.0"
+        \\}
+    ;
+    const result = loadConfig(allocator, json_content);
+    try std.testing.expectError(ConfigError.MissingModel, result);
+}
+
+test "config unsupported model type returns error" {
+    const allocator = std.testing.allocator;
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "UnknownModel",
+        \\    "vocab": {}
+        \\  }
+        \\}
+    ;
+    const result = loadConfig(allocator, json_content);
+    try std.testing.expectError(ConfigError.UnsupportedModelType, result);
+}
+
+test "config missing vocab returns error" {
+    const allocator = std.testing.allocator;
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece"
+        \\  }
+        \\}
+    ;
+    const result = loadConfig(allocator, json_content);
+    try std.testing.expectError(ConfigError.MissingVocab, result);
+}
+
+test "parse BPE model" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "BPE",
+        \\    "vocab": {
+        \\      "h": 0,
+        \\      "e": 1,
+        \\      "l": 2,
+        \\      "o": 3,
+        \\      "he": 4,
+        \\      "ll": 5,
+        \\      "hello": 6
+        \\    },
+        \\    "merges": [
+        \\      "h e",
+        \\      "l l"
+        \\    ]
+        \\  }
+        \\}
+    ;
+
+    var config = try loadConfig(allocator, json_content);
+    defer cleanupConfig(&config);
+
+    // Verify vocab loaded
+    try std.testing.expectEqual(@as(usize, 7), config.model_impl.getVocabSize());
+    try std.testing.expectEqual(@as(?u32, 0), config.model_impl.tokenToId("h"));
+    try std.testing.expectEqual(@as(?u32, 4), config.model_impl.tokenToId("he"));
+}
+
+test "parse added tokens" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {
+        \\      "[PAD]": 0,
+        \\      "[UNK]": 1
+        \\    }
+        \\  },
+        \\  "added_tokens": [
+        \\    {
+        \\      "id": 100,
+        \\      "content": "[CLS]",
+        \\      "special": true,
+        \\      "single_word": false,
+        \\      "lstrip": false,
+        \\      "rstrip": false
+        \\    },
+        \\    {
+        \\      "id": 101,
+        \\      "content": "[SEP]",
+        \\      "special": true
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var config = try loadConfig(allocator, json_content);
+    defer cleanupConfig(&config);
+
+    try std.testing.expectEqual(@as(usize, 2), config.added_tokens.len);
+    try std.testing.expectEqualStrings("[CLS]", config.added_tokens[0].content);
+    try std.testing.expectEqual(@as(?u32, 100), config.added_tokens[0].id);
+    try std.testing.expect(config.added_tokens[0].special);
+    try std.testing.expectEqualStrings("[SEP]", config.added_tokens[1].content);
+    try std.testing.expectEqual(@as(?u32, 101), config.added_tokens[1].id);
+}
+
+test "parse normalizer BertNormalizer" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {"[UNK]": 0}
+        \\  },
+        \\  "normalizer": {
+        \\    "type": "BertNormalizer",
+        \\    "clean_text": true,
+        \\    "handle_chinese_chars": true,
+        \\    "strip_accents": true,
+        \\    "lowercase": true
+        \\  }
+        \\}
+    ;
+
+    var config = try loadConfig(allocator, json_content);
+    defer cleanupConfig(&config);
+
+    try std.testing.expect(config.normalizer_impl != null);
+
+    // Test the normalizer
+    const normalized = try config.normalizer_impl.?.normalize(allocator, "HELLO");
+    defer allocator.free(normalized);
+    try std.testing.expectEqualStrings("hello", normalized);
+}
+
+test "parse normalizer Lowercase" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {"[UNK]": 0}
+        \\  },
+        \\  "normalizer": {
+        \\    "type": "Lowercase"
+        \\  }
+        \\}
+    ;
+
+    var config = try loadConfig(allocator, json_content);
+    defer cleanupConfig(&config);
+
+    try std.testing.expect(config.normalizer_impl != null);
+
+    const normalized = try config.normalizer_impl.?.normalize(allocator, "WORLD");
+    defer allocator.free(normalized);
+    try std.testing.expectEqualStrings("world", normalized);
+}
+
+test "parse pre_tokenizer BertPreTokenizer" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {"[UNK]": 0}
+        \\  },
+        \\  "pre_tokenizer": {
+        \\    "type": "BertPreTokenizer"
+        \\  }
+        \\}
+    ;
+
+    var config = try loadConfig(allocator, json_content);
+    defer cleanupConfig(&config);
+
+    try std.testing.expect(config.pretokenizer_impl != null);
+
+    // Test the pre-tokenizer
+    const tokens = try config.pretokenizer_impl.?.preTokenize(allocator, "hello world");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 2), tokens.len);
+    try std.testing.expectEqualStrings("hello", tokens[0]);
+    try std.testing.expectEqualStrings("world", tokens[1]);
+}
+
+test "parse pre_tokenizer Whitespace" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {"[UNK]": 0}
+        \\  },
+        \\  "pre_tokenizer": {
+        \\    "type": "Whitespace"
+        \\  }
+        \\}
+    ;
+
+    var config = try loadConfig(allocator, json_content);
+    defer cleanupConfig(&config);
+
+    try std.testing.expect(config.pretokenizer_impl != null);
+
+    const tokens = try config.pretokenizer_impl.?.preTokenize(allocator, "hello  world\ttest");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 3), tokens.len);
+    try std.testing.expectEqualStrings("hello", tokens[0]);
+    try std.testing.expectEqualStrings("world", tokens[1]);
+    try std.testing.expectEqualStrings("test", tokens[2]);
+}
+
+test "parse decoder WordPiece" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {"[UNK]": 0}
+        \\  },
+        \\  "decoder": {
+        \\    "type": "WordPiece",
+        \\    "prefix": "##"
+        \\  }
+        \\}
+    ;
+
+    var config = try loadConfig(allocator, json_content);
+    defer cleanupConfig(&config);
+
+    try std.testing.expect(config.decoder_impl != null);
+
+    // Test the decoder - removes ## prefixes
+    const decoded = try config.decoder_impl.?.decode(allocator, "play##ing");
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings("playing", decoded);
+}
+
+test "parse decoder BPE" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {"[UNK]": 0}
+        \\  },
+        \\  "decoder": {
+        \\    "type": "BPE"
+        \\  }
+        \\}
+    ;
+
+    var config = try loadConfig(allocator, json_content);
+    defer cleanupConfig(&config);
+
+    try std.testing.expect(config.decoder_impl != null);
+
+    // Test the decoder - replaces Ġ with space
+    const decoded = try config.decoder_impl.?.decode(allocator, "hello\xC4\xA0world");
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings("hello world", decoded);
+}
+
+test "parse post_processor BertProcessing" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {"[UNK]": 0}
+        \\  },
+        \\  "post_processor": {
+        \\    "type": "BertProcessing",
+        \\    "sep": ["[SEP]", 102],
+        \\    "cls": ["[CLS]", 101]
+        \\  }
+        \\}
+    ;
+
+    var config = try loadConfig(allocator, json_content);
+    defer cleanupConfig(&config);
+
+    try std.testing.expect(config.post_processor != null);
+}
+
+test "parse null normalizer" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {"[UNK]": 0}
+        \\  },
+        \\  "normalizer": null
+        \\}
+    ;
+
+    var config = try loadConfig(allocator, json_content);
+    defer cleanupConfig(&config);
+
+    try std.testing.expect(config.normalizer_impl == null);
+}
+
+test "parse unsupported normalizer returns null" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {"[UNK]": 0}
+        \\  },
+        \\  "normalizer": {
+        \\    "type": "SomeUnknownNormalizer"
+        \\  }
+        \\}
+    ;
+
+    var config = try loadConfig(allocator, json_content);
+    defer cleanupConfig(&config);
+
+    // Unsupported normalizers return null (skip normalization)
+    try std.testing.expect(config.normalizer_impl == null);
+}
+
+test "helper getStringField" {
+    const json_content =
+        \\{"name": "test", "count": 42}
+    ;
+    const parsed = std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_content, .{}) catch unreachable;
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+
+    // String field
+    try std.testing.expectEqualStrings("test", getStringField(obj, "name").?);
+
+    // Non-string field returns null
+    try std.testing.expect(getStringField(obj, "count") == null);
+
+    // Missing field returns null
+    try std.testing.expect(getStringField(obj, "missing") == null);
+}
+
+test "helper getBoolField" {
+    const json_content =
+        \\{"enabled": true, "disabled": false, "name": "test"}
+    ;
+    const parsed = std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_content, .{}) catch unreachable;
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+
+    // Bool fields
+    try std.testing.expectEqual(@as(?bool, true), getBoolField(obj, "enabled"));
+    try std.testing.expectEqual(@as(?bool, false), getBoolField(obj, "disabled"));
+
+    // Non-bool field returns null
+    try std.testing.expect(getBoolField(obj, "name") == null);
+
+    // Missing field returns null
+    try std.testing.expect(getBoolField(obj, "missing") == null);
+}
+
+test "isPunctuation" {
+    // Common punctuation
+    try std.testing.expect(isPunctuation('.'));
+    try std.testing.expect(isPunctuation(','));
+    try std.testing.expect(isPunctuation('!'));
+    try std.testing.expect(isPunctuation('?'));
+    try std.testing.expect(isPunctuation(';'));
+    try std.testing.expect(isPunctuation(':'));
+    try std.testing.expect(isPunctuation('('));
+    try std.testing.expect(isPunctuation(')'));
+    try std.testing.expect(isPunctuation('['));
+    try std.testing.expect(isPunctuation(']'));
+
+    // Not punctuation
+    try std.testing.expect(!isPunctuation('a'));
+    try std.testing.expect(!isPunctuation('Z'));
+    try std.testing.expect(!isPunctuation('0'));
+    try std.testing.expect(!isPunctuation(' '));
 }

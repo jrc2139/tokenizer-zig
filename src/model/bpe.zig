@@ -206,4 +206,172 @@ pub const BPE = struct {
 
         return tokens;
     }
+
+    /// Get vocabulary size
+    pub fn getVocabSize(self: *const Self) usize {
+        return self.vocab.count();
+    }
 };
+
+// ============================================================================
+// Unit Tests
+// ============================================================================
+
+fn createTestBPEVocab(allocator: std.mem.Allocator) !struct {
+    vocab: std.StringHashMapUnmanaged(u32),
+    merges: std.AutoHashMapUnmanaged(u64, PairVal),
+} {
+    var vocab = std.StringHashMapUnmanaged(u32){};
+    var merges = std.AutoHashMapUnmanaged(u64, PairVal){};
+
+    // Build a simple BPE vocabulary
+    // Individual characters first
+    const chars = [_]struct { c: []const u8, id: u32 }{
+        .{ .c = "h", .id = 0 },
+        .{ .c = "e", .id = 1 },
+        .{ .c = "l", .id = 2 },
+        .{ .c = "o", .id = 3 },
+        .{ .c = " ", .id = 4 },
+        .{ .c = "w", .id = 5 },
+        .{ .c = "r", .id = 6 },
+        .{ .c = "d", .id = 7 },
+        .{ .c = "<unk>", .id = 8 },
+        // Merged tokens
+        .{ .c = "he", .id = 9 },
+        .{ .c = "ll", .id = 10 },
+        .{ .c = "lo", .id = 11 },
+        .{ .c = "hel", .id = 12 },
+        .{ .c = "hell", .id = 13 },
+        .{ .c = "hello", .id = 14 },
+    };
+
+    for (chars) |ch| {
+        const key = try allocator.dupe(u8, ch.c);
+        try vocab.put(allocator, key, ch.id);
+    }
+
+    // Merges (pair -> new_id, rank)
+    // For "hello" to merge fully, we need: h+e->he, then he+ll->hell, then hell+o->hello
+    // The rank determines priority - lower rank merges first
+    // h + e -> he (rank 0) - first merge
+    try merges.put(allocator, (Pair{ .first = 0, .second = 1 }).hash(), .{ .rank = 0, .new_id = 9 });
+    // l + l -> ll (rank 1) - second merge
+    try merges.put(allocator, (Pair{ .first = 2, .second = 2 }).hash(), .{ .rank = 1, .new_id = 10 });
+    // he + ll -> hell (rank 2) - after he and ll exist, merge them
+    try merges.put(allocator, (Pair{ .first = 9, .second = 10 }).hash(), .{ .rank = 2, .new_id = 13 });
+    // hell + o -> hello (rank 3) - final merge
+    try merges.put(allocator, (Pair{ .first = 13, .second = 3 }).hash(), .{ .rank = 3, .new_id = 14 });
+
+    return .{ .vocab = vocab, .merges = merges };
+}
+
+test "bpe tokenize single word with merges" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{ .unk_token = "<unk>" });
+    defer bpe.deinit();
+
+    const tokens = try bpe.tokenize(allocator, "hello");
+    defer allocator.free(tokens);
+
+    // "hello" should be merged into a single token
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 14), tokens[0].id);
+}
+
+test "bpe tokenize empty string" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    const tokens = try bpe.tokenize(allocator, "");
+    // Empty string returns empty slice (not allocated)
+
+    try std.testing.expectEqual(@as(usize, 0), tokens.len);
+}
+
+test "bpe tokenize single char" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    const tokens = try bpe.tokenize(allocator, "h");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 0), tokens[0].id);
+}
+
+test "bpe vocab size" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    try std.testing.expectEqual(@as(usize, 15), bpe.getVocabSize());
+}
+
+test "bpe model interface" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    const m = bpe.getModel();
+
+    // tokenToId
+    try std.testing.expectEqual(@as(u32, 14), m.tokenToId("hello").?);
+    try std.testing.expectEqual(@as(u32, 0), m.tokenToId("h").?);
+    try std.testing.expect(m.tokenToId("notfound") == null);
+
+    // idToToken
+    try std.testing.expectEqualStrings("hello", m.idToToken(14).?);
+    try std.testing.expectEqualStrings("h", m.idToToken(0).?);
+    try std.testing.expect(m.idToToken(99999) == null);
+
+    // getVocabSize
+    try std.testing.expectEqual(@as(usize, 15), m.getVocabSize());
+}
+
+test "bpe pair hash" {
+    const pair1 = Pair{ .first = 0, .second = 1 };
+    const pair2 = Pair{ .first = 0, .second = 1 };
+    const pair3 = Pair{ .first = 1, .second = 0 };
+
+    try std.testing.expectEqual(pair1.hash(), pair2.hash());
+    try std.testing.expect(pair1.hash() != pair3.hash());
+}
+
+test "bpe token offsets preserved" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    const tokens = try bpe.tokenize(allocator, "hello");
+    defer allocator.free(tokens);
+
+    // "hello" merged to single token spanning full word
+    try std.testing.expectEqual(@as(u32, 0), tokens[0].offset.start);
+    try std.testing.expectEqual(@as(u32, 5), tokens[0].offset.end);
+}

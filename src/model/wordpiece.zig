@@ -95,6 +95,11 @@ pub const WordPiece = struct {
         allocator.destroy(self);
     }
 
+    /// Get vocabulary size
+    pub fn getVocabSize(self: *const Self) usize {
+        return self.vocab.count();
+    }
+
     /// Tokenize a single word using WordPiece algorithm
     pub fn tokenize(self: *Self, allocator: std.mem.Allocator, sequence: []const u8) ![]Token {
         var tokens = std.ArrayListUnmanaged(Token){};
@@ -179,3 +184,165 @@ pub const WordPiece = struct {
         return try tokens.toOwnedSlice(allocator);
     }
 };
+
+// ============================================================================
+// Unit Tests
+// ============================================================================
+
+fn createTestVocab(allocator: std.mem.Allocator) !std.StringHashMapUnmanaged(u32) {
+    var vocab = std.StringHashMapUnmanaged(u32){};
+
+    // Basic BERT-like vocabulary
+    const words = [_]struct { word: []const u8, id: u32 }{
+        .{ .word = "[UNK]", .id = 0 },
+        .{ .word = "[CLS]", .id = 101 },
+        .{ .word = "[SEP]", .id = 102 },
+        .{ .word = "hello", .id = 7592 },
+        .{ .word = "world", .id = 2088 },
+        .{ .word = "un", .id = 4895 },
+        .{ .word = "##known", .id = 5765 },
+        .{ .word = "play", .id = 2377 },
+        .{ .word = "##ing", .id = 2075 },
+        .{ .word = "##s", .id = 1055 },
+        .{ .word = "the", .id = 1996 },
+        .{ .word = "a", .id = 1037 },
+        .{ .word = "cat", .id = 4937 },
+        .{ .word = "dog", .id = 3899 },
+    };
+
+    for (words) |w| {
+        const key = try allocator.dupe(u8, w.word);
+        try vocab.put(allocator, key, w.id);
+    }
+
+    return vocab;
+}
+
+test "wordpiece tokenize single known word" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{});
+    defer wp.deinit();
+
+    const tokens = try wp.tokenize(allocator, "hello");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 7592), tokens[0].id);
+    try std.testing.expectEqualStrings("hello", tokens[0].value);
+}
+
+test "wordpiece tokenize with subword split" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{});
+    defer wp.deinit();
+
+    // "unknown" should split into "un" + "##known"
+    const tokens = try wp.tokenize(allocator, "unknown");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 2), tokens.len);
+    try std.testing.expectEqual(@as(u32, 4895), tokens[0].id); // "un"
+    try std.testing.expectEqual(@as(u32, 5765), tokens[1].id); // "##known"
+}
+
+test "wordpiece tokenize with suffix" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{});
+    defer wp.deinit();
+
+    // "playing" should split into "play" + "##ing"
+    const tokens = try wp.tokenize(allocator, "playing");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 2), tokens.len);
+    try std.testing.expectEqual(@as(u32, 2377), tokens[0].id); // "play"
+    try std.testing.expectEqual(@as(u32, 2075), tokens[1].id); // "##ing"
+}
+
+test "wordpiece tokenize unknown word returns UNK" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{});
+    defer wp.deinit();
+
+    // "xyz" is not in vocab and can't be split
+    const tokens = try wp.tokenize(allocator, "xyz");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 0), tokens[0].id); // [UNK]
+}
+
+test "wordpiece tokenize empty string" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{});
+    defer wp.deinit();
+
+    const tokens = try wp.tokenize(allocator, "");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 0), tokens.len);
+}
+
+test "wordpiece tokenize word too long" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{ .max_input_chars_per_word = 5 });
+    defer wp.deinit();
+
+    // "helloworld" is 10 chars, max is 5
+    const tokens = try wp.tokenize(allocator, "helloworld");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 0), tokens[0].id); // [UNK]
+}
+
+test "wordpiece vocab size" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{});
+    defer wp.deinit();
+
+    try std.testing.expectEqual(@as(usize, 14), wp.getVocabSize());
+}
+
+test "wordpiece model interface" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{});
+    defer wp.deinit();
+
+    const m = wp.getModel();
+
+    // tokenToId
+    try std.testing.expectEqual(@as(u32, 7592), m.tokenToId("hello").?);
+    try std.testing.expect(m.tokenToId("notfound") == null);
+
+    // idToToken
+    try std.testing.expectEqualStrings("hello", m.idToToken(7592).?);
+    try std.testing.expect(m.idToToken(99999) == null);
+
+    // getVocabSize
+    try std.testing.expectEqual(@as(usize, 14), m.getVocabSize());
+}
+
+test "wordpiece token offsets" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{});
+    defer wp.deinit();
+
+    const tokens = try wp.tokenize(allocator, "playing");
+    defer allocator.free(tokens);
+
+    // "play" = 0..4, "##ing" = 4..7
+    try std.testing.expectEqual(@as(u32, 0), tokens[0].offset.start);
+    try std.testing.expectEqual(@as(u32, 4), tokens[0].offset.end);
+    try std.testing.expectEqual(@as(u32, 4), tokens[1].offset.start);
+    try std.testing.expectEqual(@as(u32, 7), tokens[1].offset.end);
+}

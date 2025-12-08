@@ -122,3 +122,126 @@ test "vocab basic operations" {
     // Should be marked as special
     try std.testing.expect(vocab.isSpecialToken("[CLS]"));
 }
+
+test "vocab add multiple special tokens" {
+    const allocator = std.testing.allocator;
+
+    var vocab = Vocab.init(allocator);
+    defer vocab.deinit();
+
+    _ = try vocab.addSpecialToken(AddedToken.init("[CLS]", true));
+    _ = try vocab.addSpecialToken(AddedToken.init("[SEP]", true));
+    _ = try vocab.addSpecialToken(AddedToken.init("[PAD]", true));
+    _ = try vocab.addSpecialToken(AddedToken.init("[MASK]", true));
+
+    try std.testing.expectEqual(@as(usize, 4), vocab.len());
+    try std.testing.expect(vocab.isSpecialToken("[CLS]"));
+    try std.testing.expect(vocab.isSpecialToken("[SEP]"));
+    try std.testing.expect(vocab.isSpecialToken("[PAD]"));
+    try std.testing.expect(vocab.isSpecialToken("[MASK]"));
+}
+
+test "vocab duplicate token not added" {
+    const allocator = std.testing.allocator;
+
+    var vocab = Vocab.init(allocator);
+    defer vocab.deinit();
+
+    const first = try vocab.addSpecialToken(AddedToken.init("[CLS]", true));
+    try std.testing.expect(first);
+
+    const second = try vocab.addSpecialToken(AddedToken.init("[CLS]", true));
+    try std.testing.expect(!second);
+
+    try std.testing.expectEqual(@as(usize, 1), vocab.len());
+}
+
+test "vocab add regular token" {
+    const allocator = std.testing.allocator;
+
+    var vocab = Vocab.init(allocator);
+    defer vocab.deinit();
+
+    _ = try vocab.addToken(AddedToken.init("hello", false));
+
+    try std.testing.expectEqual(@as(usize, 1), vocab.len());
+    try std.testing.expect(vocab.tokenToId("hello") != null);
+    try std.testing.expect(!vocab.isSpecialToken("hello"));
+}
+
+test "vocab withId uses specified id" {
+    const allocator = std.testing.allocator;
+
+    var vocab = Vocab.init(allocator);
+    defer vocab.deinit();
+
+    _ = try vocab.addSpecialToken(AddedToken.withId("[PAD]", 0, true));
+    _ = try vocab.addSpecialToken(AddedToken.withId("[CLS]", 101, true));
+    _ = try vocab.addSpecialToken(AddedToken.withId("[SEP]", 102, true));
+
+    try std.testing.expectEqual(@as(u32, 0), vocab.tokenToId("[PAD]").?);
+    try std.testing.expectEqual(@as(u32, 101), vocab.tokenToId("[CLS]").?);
+    try std.testing.expectEqual(@as(u32, 102), vocab.tokenToId("[SEP]").?);
+}
+
+test "vocab idToToken returns correct strings" {
+    const allocator = std.testing.allocator;
+
+    var vocab = Vocab.init(allocator);
+    defer vocab.deinit();
+
+    _ = try vocab.addSpecialToken(AddedToken.withId("[CLS]", 101, true));
+    _ = try vocab.addSpecialToken(AddedToken.withId("[SEP]", 102, true));
+
+    try std.testing.expectEqualStrings("[CLS]", vocab.idToToken(101).?);
+    try std.testing.expectEqualStrings("[SEP]", vocab.idToToken(102).?);
+    try std.testing.expect(vocab.idToToken(999) == null);
+}
+
+test "vocab tokenToId returns null for unknown" {
+    const allocator = std.testing.allocator;
+
+    var vocab = Vocab.init(allocator);
+    defer vocab.deinit();
+
+    try std.testing.expect(vocab.tokenToId("unknown") == null);
+}
+
+test "vocab next_id increments correctly" {
+    const allocator = std.testing.allocator;
+
+    var vocab = Vocab.init(allocator);
+    defer vocab.deinit();
+
+    _ = try vocab.addSpecialToken(AddedToken.init("[A]", true));
+    _ = try vocab.addSpecialToken(AddedToken.init("[B]", true));
+    _ = try vocab.addSpecialToken(AddedToken.init("[C]", true));
+
+    // IDs should be 0, 1, 2
+    try std.testing.expectEqual(@as(u32, 0), vocab.tokenToId("[A]").?);
+    try std.testing.expectEqual(@as(u32, 1), vocab.tokenToId("[B]").?);
+    try std.testing.expectEqual(@as(u32, 2), vocab.tokenToId("[C]").?);
+}
+
+test "vocab empty after init" {
+    const allocator = std.testing.allocator;
+
+    var vocab = Vocab.init(allocator);
+    defer vocab.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), vocab.len());
+}
+
+test "vocab regular token marked special if flag set" {
+    const allocator = std.testing.allocator;
+
+    var vocab = Vocab.init(allocator);
+    defer vocab.deinit();
+
+    // AddToken can also mark as special
+    var token = AddedToken.init("special_regular", false);
+    token.special = true;
+    _ = try vocab.addToken(token);
+
+    try std.testing.expect(vocab.isSpecialToken("special_regular"));
+}

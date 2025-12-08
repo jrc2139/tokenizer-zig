@@ -219,8 +219,294 @@ pub const Tokenizer = struct {
     }
 };
 
+// ============================================================================
+// Test References - include all module tests
+// ============================================================================
+
+test {
+    // Reference all tests from submodules
+    _ = @import("types.zig");
+    _ = @import("token.zig");
+    _ = @import("vocab.zig");
+    _ = @import("encoding.zig");
+    _ = @import("model/wordpiece.zig");
+    _ = @import("model/bpe.zig");
+    _ = @import("config.zig");
+}
+
 test "basic tokenizer" {
     // Basic compilation test
     const allocator = std.testing.allocator;
     _ = allocator;
+}
+
+// ============================================================================
+// Integration Tests - Full Pipeline
+// ============================================================================
+
+test "integration: WordPiece tokenization pipeline" {
+    const allocator = std.testing.allocator;
+
+    // Full BERT-like tokenizer config
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {
+        \\      "[PAD]": 0,
+        \\      "[UNK]": 1,
+        \\      "[CLS]": 2,
+        \\      "[SEP]": 3,
+        \\      "hello": 4,
+        \\      "world": 5,
+        \\      "un": 6,
+        \\      "##known": 7,
+        \\      "play": 8,
+        \\      "##ing": 9
+        \\    },
+        \\    "unk_token": "[UNK]",
+        \\    "continuing_subword_prefix": "##"
+        \\  },
+        \\  "normalizer": {
+        \\    "type": "BertNormalizer"
+        \\  },
+        \\  "pre_tokenizer": {
+        \\    "type": "BertPreTokenizer"
+        \\  },
+        \\  "decoder": {
+        \\    "type": "WordPiece"
+        \\  },
+        \\  "added_tokens": [
+        \\    {"id": 2, "content": "[CLS]", "special": true},
+        \\    {"id": 3, "content": "[SEP]", "special": true}
+        \\  ]
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromJson(allocator, json_content);
+    defer tokenizer.deinit();
+
+    // Test basic encoding
+    var encoding = try tokenizer.encode("hello world", false);
+    defer encoding.deinit();
+
+    // Should have 2 tokens: "hello" and "world"
+    try std.testing.expectEqual(@as(usize, 2), encoding.ids.len);
+    try std.testing.expectEqual(@as(u32, 4), encoding.ids[0]); // "hello"
+    try std.testing.expectEqual(@as(u32, 5), encoding.ids[1]); // "world"
+
+    // Test vocab size includes added tokens
+    try std.testing.expectEqual(@as(usize, 12), tokenizer.getVocabSize()); // 10 vocab + 2 added
+
+    // Test tokenToId
+    try std.testing.expectEqual(@as(?u32, 4), tokenizer.tokenToId("hello"));
+    try std.testing.expectEqual(@as(?u32, 2), tokenizer.tokenToId("[CLS]"));
+
+    // Test idToToken
+    try std.testing.expectEqualStrings("hello", tokenizer.idToToken(4).?);
+    try std.testing.expectEqualStrings("[CLS]", tokenizer.idToToken(2).?);
+}
+
+test "integration: BPE tokenization pipeline" {
+    const allocator = std.testing.allocator;
+
+    // GPT-2 style BPE tokenizer
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "BPE",
+        \\    "vocab": {
+        \\      "<|endoftext|>": 0,
+        \\      "h": 1,
+        \\      "e": 2,
+        \\      "l": 3,
+        \\      "o": 4,
+        \\      " ": 5,
+        \\      "w": 6,
+        \\      "r": 7,
+        \\      "d": 8,
+        \\      "he": 9,
+        \\      "ll": 10,
+        \\      "lo": 11
+        \\    },
+        \\    "merges": [
+        \\      "h e",
+        \\      "l l",
+        \\      "l o"
+        \\    ]
+        \\  },
+        \\  "pre_tokenizer": {
+        \\    "type": "Whitespace"
+        \\  },
+        \\  "decoder": {
+        \\    "type": "BPE"
+        \\  }
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromJson(allocator, json_content);
+    defer tokenizer.deinit();
+
+    // Test vocab size
+    try std.testing.expectEqual(@as(usize, 12), tokenizer.getVocabSize());
+
+    // Test tokenToId
+    try std.testing.expectEqual(@as(?u32, 1), tokenizer.tokenToId("h"));
+    try std.testing.expectEqual(@as(?u32, 9), tokenizer.tokenToId("he"));
+}
+
+test "integration: encoding with attention mask" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {
+        \\      "[PAD]": 0,
+        \\      "[UNK]": 1,
+        \\      "test": 2,
+        \\      "word": 3
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromJson(allocator, json_content);
+    defer tokenizer.deinit();
+
+    var encoding = try tokenizer.encode("test", false);
+    defer encoding.deinit();
+
+    // Check attention mask (all 1s for actual tokens)
+    try std.testing.expectEqual(@as(usize, 1), encoding.attention_mask.len);
+    try std.testing.expectEqual(@as(u32, 1), encoding.attention_mask[0]);
+}
+
+test "integration: tokenizer decode" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {
+        \\      "[PAD]": 0,
+        \\      "[UNK]": 1,
+        \\      "hello": 2,
+        \\      "world": 3
+        \\    }
+        \\  },
+        \\  "decoder": {
+        \\    "type": "WordPiece"
+        \\  }
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromJson(allocator, json_content);
+    defer tokenizer.deinit();
+
+    // Decode token IDs
+    const ids = [_]u32{ 2, 3 };
+    const decoded = try tokenizer.decode(&ids, false);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualStrings("helloworld", decoded);
+}
+
+test "integration: tokenizer skip special tokens in decode" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {
+        \\      "[PAD]": 0,
+        \\      "[CLS]": 1,
+        \\      "[SEP]": 2,
+        \\      "hello": 3
+        \\    }
+        \\  },
+        \\  "added_tokens": [
+        \\    {"id": 1, "content": "[CLS]", "special": true},
+        \\    {"id": 2, "content": "[SEP]", "special": true}
+        \\  ]
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromJson(allocator, json_content);
+    defer tokenizer.deinit();
+
+    // Decode with special tokens included
+    const ids_with_special = [_]u32{ 1, 3, 2 }; // [CLS] hello [SEP]
+    const decoded_with_special = try tokenizer.decode(&ids_with_special, false);
+    defer allocator.free(decoded_with_special);
+    try std.testing.expectEqualStrings("[CLS]hello[SEP]", decoded_with_special);
+
+    // Decode with special tokens skipped
+    const decoded_skip_special = try tokenizer.decode(&ids_with_special, true);
+    defer allocator.free(decoded_skip_special);
+    try std.testing.expectEqualStrings("hello", decoded_skip_special);
+}
+
+test "integration: encoding offsets track original positions" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {
+        \\      "[UNK]": 0,
+        \\      "hello": 1
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromJson(allocator, json_content);
+    defer tokenizer.deinit();
+
+    var encoding = try tokenizer.encode("hello", false);
+    defer encoding.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), encoding.offsets.len);
+    try std.testing.expectEqual(@as(u32, 0), encoding.offsets[0].start);
+    try std.testing.expectEqual(@as(u32, 5), encoding.offsets[0].end);
+}
+
+test "integration: add special tokens to vocabulary" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {
+        \\      "[UNK]": 0,
+        \\      "hello": 1
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromJson(allocator, json_content);
+    defer tokenizer.deinit();
+
+    const initial_size = tokenizer.getVocabSize();
+
+    // Add special tokens
+    const new_tokens = [_]AddedToken{
+        AddedToken.init("[MASK]", true),
+        AddedToken.init("[NEW]", true),
+    };
+    const added = try tokenizer.addSpecialTokens(&new_tokens);
+
+    try std.testing.expectEqual(@as(usize, 2), added);
+    try std.testing.expectEqual(initial_size + 2, tokenizer.getVocabSize());
+
+    // Verify they're accessible
+    try std.testing.expect(tokenizer.tokenToId("[MASK]") != null);
+    try std.testing.expect(tokenizer.tokenToId("[NEW]") != null);
 }
