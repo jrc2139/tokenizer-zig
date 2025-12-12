@@ -245,3 +245,451 @@ pub const Sequence = struct {
         self.deinit();
     }
 };
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "Whitespace: splits on space" {
+    const allocator = std.testing.allocator;
+    var ws = Whitespace{};
+    const pt = ws.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello world");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+    try std.testing.expectEqualStrings("world", result[1]);
+}
+
+test "Whitespace: splits on tab" {
+    const allocator = std.testing.allocator;
+    var ws = Whitespace{};
+    const pt = ws.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello\tworld");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+    try std.testing.expectEqualStrings("world", result[1]);
+}
+
+test "Whitespace: splits on newline" {
+    const allocator = std.testing.allocator;
+    var ws = Whitespace{};
+    const pt = ws.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello\nworld");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+    try std.testing.expectEqualStrings("world", result[1]);
+}
+
+test "Whitespace: splits on carriage return" {
+    const allocator = std.testing.allocator;
+    var ws = Whitespace{};
+    const pt = ws.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello\rworld");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+    try std.testing.expectEqualStrings("world", result[1]);
+}
+
+test "Whitespace: multiple consecutive spaces" {
+    const allocator = std.testing.allocator;
+    var ws = Whitespace{};
+    const pt = ws.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello   world");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+    try std.testing.expectEqualStrings("world", result[1]);
+}
+
+test "Whitespace: empty string returns empty" {
+    const allocator = std.testing.allocator;
+    var ws = Whitespace{};
+    const pt = ws.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "Whitespace: single word" {
+    const allocator = std.testing.allocator;
+    var ws = Whitespace{};
+    const pt = ws.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+}
+
+test "Whitespace: leading and trailing whitespace" {
+    const allocator = std.testing.allocator;
+    var ws = Whitespace{};
+    const pt = ws.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "  hello world  ");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+    try std.testing.expectEqualStrings("world", result[1]);
+}
+
+test "Whitespace: mixed whitespace types" {
+    const allocator = std.testing.allocator;
+    var ws = Whitespace{};
+    const pt = ws.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "a \t\n\r b");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("a", result[0]);
+    try std.testing.expectEqualStrings("b", result[1]);
+}
+
+test "Whitespace: preserves unicode content" {
+    const allocator = std.testing.allocator;
+    var ws = Whitespace{};
+    const pt = ws.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello \xe4\xb8\x96\xe7\x95\x8c");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+    try std.testing.expectEqualStrings("\xe4\xb8\x96\xe7\x95\x8c", result[1]);
+}
+
+test "BertPreTokenizer: splits on space" {
+    const allocator = std.testing.allocator;
+    var bert = BertPreTokenizer{};
+    const pt = bert.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello world");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+    try std.testing.expectEqualStrings("world", result[1]);
+}
+
+test "BertPreTokenizer: period as separate token" {
+    const allocator = std.testing.allocator;
+    var bert = BertPreTokenizer{};
+    const pt = bert.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello.");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+    try std.testing.expectEqualStrings(".", result[1]);
+}
+
+test "BertPreTokenizer: comma as separate token" {
+    const allocator = std.testing.allocator;
+    var bert = BertPreTokenizer{};
+    const pt = bert.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "a,b");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+    try std.testing.expectEqualStrings("a", result[0]);
+    try std.testing.expectEqualStrings(",", result[1]);
+    try std.testing.expectEqualStrings("b", result[2]);
+}
+
+test "BertPreTokenizer: exclamation as separate token" {
+    const allocator = std.testing.allocator;
+    var bert = BertPreTokenizer{};
+    const pt = bert.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "wow!");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("wow", result[0]);
+    try std.testing.expectEqualStrings("!", result[1]);
+}
+
+test "BertPreTokenizer: question mark as separate token" {
+    const allocator = std.testing.allocator;
+    var bert = BertPreTokenizer{};
+    const pt = bert.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "what?");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("what", result[0]);
+    try std.testing.expectEqualStrings("?", result[1]);
+}
+
+test "BertPreTokenizer: brackets as separate tokens" {
+    const allocator = std.testing.allocator;
+    var bert = BertPreTokenizer{};
+    const pt = bert.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "[hello]");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+    try std.testing.expectEqualStrings("[", result[0]);
+    try std.testing.expectEqualStrings("hello", result[1]);
+    try std.testing.expectEqualStrings("]", result[2]);
+}
+
+test "BertPreTokenizer: mixed punctuation and words" {
+    const allocator = std.testing.allocator;
+    var bert = BertPreTokenizer{};
+    const pt = bert.preTokenizer();
+
+    // "Hello, world!" -> ["Hello", ",", "world", "!"] (4 tokens, space consumed)
+    const result = try pt.preTokenize(allocator, "Hello, world!");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 4), result.len);
+    try std.testing.expectEqualStrings("Hello", result[0]);
+    try std.testing.expectEqualStrings(",", result[1]);
+    try std.testing.expectEqualStrings("world", result[2]);
+    try std.testing.expectEqualStrings("!", result[3]);
+}
+
+test "BertPreTokenizer: handles empty string" {
+    const allocator = std.testing.allocator;
+    var bert = BertPreTokenizer{};
+    const pt = bert.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "BertPreTokenizer: consecutive punctuation" {
+    const allocator = std.testing.allocator;
+    var bert = BertPreTokenizer{};
+    const pt = bert.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "...");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+    try std.testing.expectEqualStrings(".", result[0]);
+    try std.testing.expectEqualStrings(".", result[1]);
+    try std.testing.expectEqualStrings(".", result[2]);
+}
+
+test "BertPreTokenizer: punctuation at start" {
+    const allocator = std.testing.allocator;
+    var bert = BertPreTokenizer{};
+    const pt = bert.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "!hello");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("!", result[0]);
+    try std.testing.expectEqualStrings("hello", result[1]);
+}
+
+test "BertPreTokenizer: punctuation at end" {
+    const allocator = std.testing.allocator;
+    var bert = BertPreTokenizer{};
+    const pt = bert.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello!");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+    try std.testing.expectEqualStrings("!", result[1]);
+}
+
+test "BertPreTokenizer: isPunctuation covers all ranges" {
+    // ASCII punctuation ranges: 33-47, 58-64, 91-96, 123-126
+    const allocator = std.testing.allocator;
+    var bert = BertPreTokenizer{};
+    const pt = bert.preTokenizer();
+
+    // Test boundary characters from each range
+    const result = try pt.preTokenize(allocator, "!/:@[`{~");
+    defer allocator.free(result);
+
+    // Each character should be its own token
+    try std.testing.expectEqual(@as(usize, 8), result.len);
+    try std.testing.expectEqualStrings("!", result[0]); // 33
+    try std.testing.expectEqualStrings("/", result[1]); // 47
+    try std.testing.expectEqualStrings(":", result[2]); // 58
+    try std.testing.expectEqualStrings("@", result[3]); // 64
+    try std.testing.expectEqualStrings("[", result[4]); // 91
+    try std.testing.expectEqualStrings("`", result[5]); // 96
+    try std.testing.expectEqualStrings("{", result[6]); // 123
+    try std.testing.expectEqualStrings("~", result[7]); // 126
+}
+
+test "ByteLevel: splits on whitespace" {
+    const allocator = std.testing.allocator;
+    var bl = ByteLevel{};
+    const pt = bl.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello world");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+    try std.testing.expectEqualStrings("world", result[1]);
+}
+
+test "ByteLevel: empty string" {
+    const allocator = std.testing.allocator;
+    var bl = ByteLevel{};
+    const pt = bl.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "ByteLevel: single word" {
+    const allocator = std.testing.allocator;
+    var bl = ByteLevel{};
+    const pt = bl.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+}
+
+test "ByteLevel: preserves UTF-8" {
+    const allocator = std.testing.allocator;
+    var bl = ByteLevel{};
+    const pt = bl.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "\xe4\xb8\x96\xe7\x95\x8c");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+    try std.testing.expectEqualStrings("\xe4\xb8\x96\xe7\x95\x8c", result[0]);
+}
+
+test "ByteLevel: multiple words" {
+    const allocator = std.testing.allocator;
+    var bl = ByteLevel{};
+    const pt = bl.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "a b c d");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 4), result.len);
+}
+
+test "Sequence: empty list returns input wrapped" {
+    const allocator = std.testing.allocator;
+    var seq = try Sequence.init(allocator, &.{});
+    defer seq.deinit();
+    const pt = seq.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello world");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+    try std.testing.expectEqualStrings("hello world", result[0]);
+}
+
+test "Sequence: single pre-tokenizer" {
+    const allocator = std.testing.allocator;
+    var ws = Whitespace{};
+
+    var seq = try Sequence.init(allocator, &.{ws.preTokenizer()});
+    defer seq.deinit();
+    const pt = seq.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "hello world");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+    try std.testing.expectEqualStrings("world", result[1]);
+}
+
+test "Sequence: chained Whitespace then BertPreTokenizer" {
+    const allocator = std.testing.allocator;
+    var ws = Whitespace{};
+    var bert = BertPreTokenizer{};
+
+    var seq = try Sequence.init(allocator, &.{ ws.preTokenizer(), bert.preTokenizer() });
+    defer seq.deinit();
+    const pt = seq.preTokenizer();
+
+    // First Whitespace splits on spaces, then BERT splits each token on punctuation
+    const result = try pt.preTokenize(allocator, "hello! world.");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 4), result.len);
+    try std.testing.expectEqualStrings("hello", result[0]);
+    try std.testing.expectEqualStrings("!", result[1]);
+    try std.testing.expectEqualStrings("world", result[2]);
+    try std.testing.expectEqualStrings(".", result[3]);
+}
+
+test "Sequence: deinit via interface" {
+    const allocator = std.testing.allocator;
+    var ws = Whitespace{};
+
+    var seq = try Sequence.init(allocator, &.{ws.preTokenizer()});
+    var pt = seq.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "a b");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+
+    // deinit via interface
+    pt.deinit();
+}
+
+test "PreTokenizer: deinit with null function is safe" {
+    var ws = Whitespace{};
+    var pt = ws.preTokenizer();
+
+    // deinit_fn is null for Whitespace
+    pt.deinit();
+}
+
+test "Sequence: multiple passes accumulate tokens" {
+    const allocator = std.testing.allocator;
+    var ws1 = Whitespace{};
+    var ws2 = Whitespace{};
+
+    // Two whitespace passes should give same result (idempotent)
+    var seq = try Sequence.init(allocator, &.{ ws1.preTokenizer(), ws2.preTokenizer() });
+    defer seq.deinit();
+    const pt = seq.preTokenizer();
+
+    const result = try pt.preTokenize(allocator, "a b c");
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+}

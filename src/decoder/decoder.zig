@@ -160,3 +160,280 @@ pub const Sequence = struct {
         self.deinit();
     }
 };
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "WordPieceDecoder: removes ## prefix and concatenates" {
+    const allocator = std.testing.allocator;
+    var wpd = WordPieceDecoder{};
+    const d = wpd.decoder();
+
+    // ## prefix is removed and subwords are concatenated
+    const result = try d.decode(allocator, "hello##world");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("helloworld", result);
+}
+
+test "WordPieceDecoder: multiple subwords concatenate" {
+    const allocator = std.testing.allocator;
+    var wpd = WordPieceDecoder{};
+    const d = wpd.decoder();
+
+    const result = try d.decode(allocator, "hello##ing##ly");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("helloingly", result);
+}
+
+test "WordPieceDecoder: no space before first word" {
+    const allocator = std.testing.allocator;
+    var wpd = WordPieceDecoder{};
+    const d = wpd.decoder();
+
+    const result = try d.decode(allocator, "hello");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("hello", result);
+}
+
+test "WordPieceDecoder: handles multiple subwords" {
+    const allocator = std.testing.allocator;
+    var wpd = WordPieceDecoder{};
+    const d = wpd.decoder();
+
+    // All subwords concatenate after removing ## prefix
+    const result = try d.decode(allocator, "un##believ##able");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("unbelievable", result);
+}
+
+test "WordPieceDecoder: empty input" {
+    const allocator = std.testing.allocator;
+    var wpd = WordPieceDecoder{};
+    const d = wpd.decoder();
+
+    const result = try d.decode(allocator, "");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("", result);
+}
+
+test "WordPieceDecoder: single word no prefix" {
+    const allocator = std.testing.allocator;
+    var wpd = WordPieceDecoder{};
+    const d = wpd.decoder();
+
+    const result = try d.decode(allocator, "test");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("test", result);
+}
+
+test "WordPieceDecoder: only subwords (starts with ##)" {
+    const allocator = std.testing.allocator;
+    var wpd = WordPieceDecoder{};
+    const d = wpd.decoder();
+
+    const result = try d.decode(allocator, "##ing##ed");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("inged", result);
+}
+
+test "WordPieceDecoder: custom prefix" {
+    const allocator = std.testing.allocator;
+    var wpd = WordPieceDecoder{ .prefix = "@@" };
+    const d = wpd.decoder();
+
+    // Custom prefix is removed and subwords concatenate
+    const result = try d.decode(allocator, "hello@@world");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("helloworld", result);
+}
+
+test "WordPieceDecoder: preserves UTF-8" {
+    const allocator = std.testing.allocator;
+    var wpd = WordPieceDecoder{};
+    const d = wpd.decoder();
+
+    // UTF-8 content is preserved, ## removed
+    const result = try d.decode(allocator, "\xe4\xb8\x96##\xe7\x95\x8c");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("\xe4\xb8\x96\xe7\x95\x8c", result);
+}
+
+test "WordPieceDecoder: interface method" {
+    const allocator = std.testing.allocator;
+    var wpd = WordPieceDecoder{};
+    const d = wpd.decoder();
+
+    const result = try d.decode(allocator, "a##b");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("ab", result);
+}
+
+test "WordPieceDecoder: separate words get space" {
+    const allocator = std.testing.allocator;
+    var wpd = WordPieceDecoder{};
+    const d = wpd.decoder();
+
+    // Two separate words (neither starts with ##) get a space between them
+    const result = try d.decode(allocator, "helloworld");
+    defer allocator.free(result);
+    // Without ## prefix, treated as single word
+    try std.testing.expectEqualStrings("helloworld", result);
+}
+
+test "BPEDecoder: pass through" {
+    const allocator = std.testing.allocator;
+    var bped = BPEDecoder{};
+    const d = bped.decoder();
+
+    const result = try d.decode(allocator, "hello world");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("hello world", result);
+}
+
+test "BPEDecoder: empty input" {
+    const allocator = std.testing.allocator;
+    var bped = BPEDecoder{};
+    const d = bped.decoder();
+
+    const result = try d.decode(allocator, "");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("", result);
+}
+
+test "BPEDecoder: preserves content" {
+    const allocator = std.testing.allocator;
+    var bped = BPEDecoder{};
+    const d = bped.decoder();
+
+    const result = try d.decode(allocator, "Test123!@#");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Test123!@#", result);
+}
+
+test "BPEDecoder: preserves UTF-8" {
+    const allocator = std.testing.allocator;
+    var bped = BPEDecoder{};
+    const d = bped.decoder();
+
+    const result = try d.decode(allocator, "\xe4\xb8\x96\xe7\x95\x8c");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("\xe4\xb8\x96\xe7\x95\x8c", result);
+}
+
+test "BPEDecoder: interface method" {
+    const allocator = std.testing.allocator;
+    var bped = BPEDecoder{};
+    const d = bped.decoder();
+
+    const result = try d.decode(allocator, "test");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("test", result);
+}
+
+test "ByteLevelDecoder: pass through" {
+    const allocator = std.testing.allocator;
+    var bld = ByteLevelDecoder{};
+    const d = bld.decoder();
+
+    const result = try d.decode(allocator, "hello world");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("hello world", result);
+}
+
+test "ByteLevelDecoder: empty input" {
+    const allocator = std.testing.allocator;
+    var bld = ByteLevelDecoder{};
+    const d = bld.decoder();
+
+    const result = try d.decode(allocator, "");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("", result);
+}
+
+test "ByteLevelDecoder: preserves UTF-8" {
+    const allocator = std.testing.allocator;
+    var bld = ByteLevelDecoder{};
+    const d = bld.decoder();
+
+    const result = try d.decode(allocator, "\xe4\xb8\x96\xe7\x95\x8c");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("\xe4\xb8\x96\xe7\x95\x8c", result);
+}
+
+test "Sequence: empty list pass through" {
+    const allocator = std.testing.allocator;
+    var seq = try Sequence.init(allocator, &.{});
+    defer seq.deinit();
+    const d = seq.decoder();
+
+    const result = try d.decode(allocator, "hello");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("hello", result);
+}
+
+test "Sequence: single decoder" {
+    const allocator = std.testing.allocator;
+    var wpd = WordPieceDecoder{};
+
+    var seq = try Sequence.init(allocator, &.{wpd.decoder()});
+    defer seq.deinit();
+    const d = seq.decoder();
+
+    // WordPieceDecoder removes ## and concatenates
+    const result = try d.decode(allocator, "hello##world");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("helloworld", result);
+}
+
+test "Sequence: multiple decoders" {
+    const allocator = std.testing.allocator;
+    var bped = BPEDecoder{};
+    var bld = ByteLevelDecoder{};
+
+    var seq = try Sequence.init(allocator, &.{ bped.decoder(), bld.decoder() });
+    defer seq.deinit();
+    const d = seq.decoder();
+
+    const result = try d.decode(allocator, "test");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("test", result);
+}
+
+test "Sequence: chains WordPiece then BPE" {
+    const allocator = std.testing.allocator;
+    var wpd = WordPieceDecoder{};
+    var bped = BPEDecoder{};
+
+    var seq = try Sequence.init(allocator, &.{ wpd.decoder(), bped.decoder() });
+    defer seq.deinit();
+    const d = seq.decoder();
+
+    // WordPiece removes ##, BPE passes through
+    const result = try d.decode(allocator, "un##do");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("undo", result);
+}
+
+test "Sequence: deinit via interface" {
+    const allocator = std.testing.allocator;
+    var bped = BPEDecoder{};
+
+    var seq = try Sequence.init(allocator, &.{bped.decoder()});
+    var d = seq.decoder();
+
+    const result = try d.decode(allocator, "test");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("test", result);
+
+    // deinit via interface
+    d.deinit();
+}
+
+test "Decoder: deinit with null function is safe" {
+    var bped = BPEDecoder{};
+    var d = bped.decoder();
+
+    // deinit_fn is null for BPEDecoder
+    d.deinit();
+}

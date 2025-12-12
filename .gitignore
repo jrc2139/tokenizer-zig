@@ -12,3 +12,7 @@ deps/
 deps.zig
 files.zig
 zigmod.lock
+
+# Coverage
+coverage/
+kcov-output/

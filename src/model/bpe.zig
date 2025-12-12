@@ -420,3 +420,93 @@ test "bpe token offsets preserved" {
     try std.testing.expectEqual(@as(u32, 0), tokens[0].offset.start);
     try std.testing.expectEqual(@as(u32, 5), tokens[0].offset.end);
 }
+
+test "bpe no merges possible" {
+    const allocator = std.testing.allocator;
+
+    // Create vocab with chars but no merges
+    var vocab = std.StringHashMapUnmanaged(u32){};
+    try vocab.put(allocator, try allocator.dupe(u8, "a"), 0);
+    try vocab.put(allocator, try allocator.dupe(u8, "b"), 1);
+    try vocab.put(allocator, try allocator.dupe(u8, "c"), 2);
+
+    // Empty merge rules
+    const merges = std.AutoHashMapUnmanaged(u64, PairVal){};
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    // Without merges, each char stays separate
+    const tokens = try bpe.tokenize(allocator, "abc");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 3), tokens.len);
+    try std.testing.expectEqual(@as(u32, 0), tokens[0].id); // "a"
+    try std.testing.expectEqual(@as(u32, 1), tokens[1].id); // "b"
+    try std.testing.expectEqual(@as(u32, 2), tokens[2].id); // "c"
+}
+
+test "bpe char not in vocab skipped" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    // 'z' is not in vocab, should be skipped (no unk_token set)
+    const tokens = try bpe.tokenize(allocator, "hz");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 0), tokens[0].id); // "h"
+}
+
+test "bpe two char word no merge" {
+    const allocator = std.testing.allocator;
+
+    var vocab = std.StringHashMapUnmanaged(u32){};
+    try vocab.put(allocator, try allocator.dupe(u8, "x"), 0);
+    try vocab.put(allocator, try allocator.dupe(u8, "y"), 1);
+
+    const merges = std.AutoHashMapUnmanaged(u64, PairVal){};
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    const tokens = try bpe.tokenize(allocator, "xy");
+    defer allocator.free(tokens);
+
+    // No merge rule for "xy", so stays as two tokens
+    try std.testing.expectEqual(@as(usize, 2), tokens.len);
+}
+
+test "bpe multiple merges chain" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    // "hello" should go through multiple merges:
+    // h,e,l,l,o -> he,l,l,o -> hel,l,o -> hell,o -> hello
+    const tokens = try bpe.tokenize(allocator, "hello");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqualStrings("hello", tokens[0].value);
+}
+
+test "bpe pair hash equality" {
+    const pair1 = Pair{ .first = 10, .second = 20 };
+    const pair2 = Pair{ .first = 10, .second = 20 };
+    const pair3 = Pair{ .first = 20, .second = 10 };
+
+    // Same pairs have same hash
+    try std.testing.expectEqual(pair1.hash(), pair2.hash());
+    // Different pairs have different hash
+    try std.testing.expect(pair1.hash() != pair3.hash());
+}

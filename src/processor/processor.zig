@@ -159,3 +159,241 @@ pub const RobertaProcessing = struct {
         // TODO: Handle sequence pairs <s> A </s></s> B </s>
     }
 };
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "BertProcessing: init stores tokens" {
+    const bp = BertProcessing.init("[SEP]", 102, "[CLS]", 101);
+
+    try std.testing.expectEqualStrings("[SEP]", bp.sep.token);
+    try std.testing.expectEqual(@as(u32, 102), bp.sep.id);
+    try std.testing.expectEqualStrings("[CLS]", bp.cls.token);
+    try std.testing.expectEqual(@as(u32, 101), bp.cls.id);
+}
+
+test "BertProcessing: postProcessor interface" {
+    var bp = BertProcessing.init("[SEP]", 102, "[CLS]", 101);
+    const pp = bp.postProcessor();
+
+    // Verify process_pair_fn is set (not null)
+    try std.testing.expect(pp.process_pair_fn != null);
+}
+
+test "BertProcessing: process single encoding (stub)" {
+    const allocator = std.testing.allocator;
+    var bp = BertProcessing.init("[SEP]", 102, "[CLS]", 101);
+    const pp = bp.postProcessor();
+
+    var encoding = Encoding.empty(allocator);
+    defer encoding.deinit();
+
+    // Currently a stub - should not error
+    try pp.process(&encoding);
+}
+
+test "BertProcessing: processPair (stub)" {
+    const allocator = std.testing.allocator;
+    var bp = BertProcessing.init("[SEP]", 102, "[CLS]", 101);
+    const pp = bp.postProcessor();
+
+    var encoding1 = Encoding.empty(allocator);
+    defer encoding1.deinit();
+    var encoding2 = Encoding.empty(allocator);
+    defer encoding2.deinit();
+
+    // Currently a stub - should not error
+    try pp.processPair(&encoding1, &encoding2);
+}
+
+test "BertProcessing: deinit is null (safe)" {
+    var bp = BertProcessing.init("[SEP]", 102, "[CLS]", 101);
+    var pp = bp.postProcessor();
+
+    // deinit_fn is null, should not crash
+    pp.deinit();
+}
+
+test "TemplateProcessing: postProcessor interface" {
+    const allocator = std.testing.allocator;
+    var tp = TemplateProcessing{
+        .single = &.{},
+        .pair = null,
+        .special_tokens = &.{},
+        .allocator = allocator,
+    };
+    const pp = tp.postProcessor();
+
+    // Verify deinit_fn is set (not null)
+    try std.testing.expect(pp.deinit_fn != null);
+}
+
+test "TemplateProcessing: process (stub)" {
+    const allocator = std.testing.allocator;
+    var tp = TemplateProcessing{
+        .single = &.{},
+        .pair = null,
+        .special_tokens = &.{},
+        .allocator = allocator,
+    };
+    const pp = tp.postProcessor();
+
+    var encoding = Encoding.empty(allocator);
+    defer encoding.deinit();
+
+    // Currently a stub - should not error
+    try pp.process(&encoding);
+}
+
+test "TemplateProcessing: processPair (stub)" {
+    const allocator = std.testing.allocator;
+    var tp = TemplateProcessing{
+        .single = &.{},
+        .pair = null,
+        .special_tokens = &.{},
+        .allocator = allocator,
+    };
+    const pp = tp.postProcessor();
+
+    var encoding1 = Encoding.empty(allocator);
+    defer encoding1.deinit();
+    var encoding2 = Encoding.empty(allocator);
+    defer encoding2.deinit();
+
+    // Currently a stub - should not error
+    try pp.processPair(&encoding1, &encoding2);
+}
+
+test "TemplateProcessing: deinit via interface (stub)" {
+    const allocator = std.testing.allocator;
+    var tp = TemplateProcessing{
+        .single = &.{},
+        .pair = null,
+        .special_tokens = &.{},
+        .allocator = allocator,
+    };
+    var pp = tp.postProcessor();
+
+    // Currently a stub - should not error
+    pp.deinit();
+}
+
+test "RobertaProcessing: postProcessor interface" {
+    var rp = RobertaProcessing{
+        .sep = .{ .token = "</s>", .id = 2 },
+        .cls = .{ .token = "<s>", .id = 0 },
+    };
+    const pp = rp.postProcessor();
+
+    // Verify process_pair_fn is set (not null)
+    try std.testing.expect(pp.process_pair_fn != null);
+}
+
+test "RobertaProcessing: stores config options" {
+    const rp = RobertaProcessing{
+        .sep = .{ .token = "</s>", .id = 2 },
+        .cls = .{ .token = "<s>", .id = 0 },
+        .trim_offsets = false,
+        .add_prefix_space = false,
+    };
+
+    try std.testing.expectEqual(false, rp.trim_offsets);
+    try std.testing.expectEqual(false, rp.add_prefix_space);
+}
+
+test "RobertaProcessing: process (stub)" {
+    const allocator = std.testing.allocator;
+    var rp = RobertaProcessing{
+        .sep = .{ .token = "</s>", .id = 2 },
+        .cls = .{ .token = "<s>", .id = 0 },
+    };
+    const pp = rp.postProcessor();
+
+    var encoding = Encoding.empty(allocator);
+    defer encoding.deinit();
+
+    // Currently a stub - should not error
+    try pp.process(&encoding);
+}
+
+test "RobertaProcessing: processPair (stub)" {
+    const allocator = std.testing.allocator;
+    var rp = RobertaProcessing{
+        .sep = .{ .token = "</s>", .id = 2 },
+        .cls = .{ .token = "<s>", .id = 0 },
+    };
+    const pp = rp.postProcessor();
+
+    var encoding1 = Encoding.empty(allocator);
+    defer encoding1.deinit();
+    var encoding2 = Encoding.empty(allocator);
+    defer encoding2.deinit();
+
+    // Currently a stub - should not error
+    try pp.processPair(&encoding1, &encoding2);
+}
+
+test "RobertaProcessing: deinit is null (safe)" {
+    var rp = RobertaProcessing{
+        .sep = .{ .token = "</s>", .id = 2 },
+        .cls = .{ .token = "<s>", .id = 0 },
+    };
+    var pp = rp.postProcessor();
+
+    // deinit_fn is null, should not crash
+    pp.deinit();
+}
+
+test "PostProcessor: processPair with null function is no-op" {
+    const allocator = std.testing.allocator;
+    // Create a PostProcessor with null process_pair_fn
+    const pp = PostProcessor{
+        .ptr = undefined,
+        .process_fn = struct {
+            fn process(_: *anyopaque, _: *Encoding) anyerror!void {}
+        }.process,
+        .process_pair_fn = null,
+    };
+
+    var encoding1 = Encoding.empty(allocator);
+    defer encoding1.deinit();
+    var encoding2 = Encoding.empty(allocator);
+    defer encoding2.deinit();
+
+    // Should be no-op, not error
+    try pp.processPair(&encoding1, &encoding2);
+}
+
+test "SpecialToken: struct fields" {
+    const st = SpecialToken{
+        .id = "[CLS]",
+        .ids = &.{101},
+        .tokens = &.{"[CLS]"},
+    };
+
+    try std.testing.expectEqualStrings("[CLS]", st.id);
+    try std.testing.expectEqual(@as(usize, 1), st.ids.len);
+    try std.testing.expectEqual(@as(u32, 101), st.ids[0]);
+}
+
+test "TemplatePiece: sequence variant" {
+    const piece = TemplateProcessing.TemplatePiece{ .sequence = .{ .id = 0, .type_id = 0 } };
+    switch (piece) {
+        .sequence => |s| {
+            try std.testing.expectEqual(@as(u8, 0), s.id);
+            try std.testing.expectEqual(@as(u32, 0), s.type_id);
+        },
+        .special_token => unreachable,
+    }
+}
+
+test "TemplatePiece: special_token variant" {
+    const piece = TemplateProcessing.TemplatePiece{ .special_token = .{ .id = "[CLS]" } };
+    switch (piece) {
+        .sequence => unreachable,
+        .special_token => |st| {
+            try std.testing.expectEqualStrings("[CLS]", st.id);
+        },
+    }
+}

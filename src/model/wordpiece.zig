@@ -381,3 +381,106 @@ test "wordpiece token offsets" {
     try std.testing.expectEqual(@as(u32, 4), tokens[1].offset.start);
     try std.testing.expectEqual(@as(u32, 7), tokens[1].offset.end);
 }
+
+test "wordpiece exactly at max_input_chars" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{ .max_input_chars_per_word = 5 });
+    defer wp.deinit();
+
+    // "hello" is exactly 5 chars, should tokenize normally
+    const tokens = try wp.tokenize(allocator, "hello");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 7592), tokens[0].id); // "hello"
+}
+
+test "wordpiece one over max_input_chars" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{ .max_input_chars_per_word = 5 });
+    defer wp.deinit();
+
+    // "helloo" is 6 chars, max is 5, should return UNK
+    const tokens = try wp.tokenize(allocator, "helloo");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 0), tokens[0].id); // [UNK]
+}
+
+test "wordpiece custom unk token" {
+    const allocator = std.testing.allocator;
+
+    // Create vocab with custom UNK - use the base vocab and check UNK behavior
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{ .unk_token = "[UNK]" });
+    defer wp.deinit();
+
+    // Unknown word should return UNK token (ID 0 in createTestVocab)
+    const tokens = try wp.tokenize(allocator, "xyz");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 0), tokens[0].id); // [UNK]
+}
+
+test "wordpiece continuing_subword_prefix default" {
+    const allocator = std.testing.allocator;
+
+    // Test that the default ## prefix works
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{});
+    defer wp.deinit();
+
+    const tokens = try wp.tokenize(allocator, "playing");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 2), tokens.len);
+    try std.testing.expectEqualStrings("play", tokens[0].value);
+    try std.testing.expectEqualStrings("##ing", tokens[1].value);
+}
+
+test "wordpiece single char word in vocab" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{});
+    defer wp.deinit();
+
+    // Single char "a" IS in vocab (ID 1037)
+    const tokens = try wp.tokenize(allocator, "a");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 1037), tokens[0].id); // "a"
+}
+
+test "wordpiece single char not in vocab" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{});
+    defer wp.deinit();
+
+    // Single char "z" is NOT in vocab, returns UNK
+    const tokens = try wp.tokenize(allocator, "z");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 0), tokens[0].id); // [UNK]
+}
+
+test "wordpiece multiple subword splits" {
+    const allocator = std.testing.allocator;
+    const vocab = try createTestVocab(allocator);
+    var wp = try WordPiece.init(allocator, vocab, .{});
+    defer wp.deinit();
+
+    // "playing" -> "play" + "##ing"
+    const tokens = try wp.tokenize(allocator, "playing");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 2), tokens.len);
+    try std.testing.expectEqualStrings("play", tokens[0].value);
+    try std.testing.expectEqualStrings("##ing", tokens[1].value);
+}
