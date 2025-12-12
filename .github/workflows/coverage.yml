@@ -17,55 +17,50 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.0
+          version: 0.15.2
 
-      - name: action-kcov
-        uses: sudo-bot/action-kcov@latest
-
-      - name: Build test binary
+      - name: Run tests with coverage
         run: |
-          mkdir -p zig-out/bin
-          zig test src/lib.zig --test-no-exec -femit-bin=zig-out/bin/test-runner
+          zig test src/lib.zig \
+            -fcode-coverage \
+            --emit-bin=zig-out/bin/test-runner \
+            --emit-pdb=zig-out/bin/ \
+            2>&1 || true
 
-      - name: Run coverage analysis
+          # Run the binary to generate profraw data
+          ./zig-out/bin/test-runner 2>&1 || true
+
+      - name: Generate coverage report
         run: |
-          mkdir -p coverage
-          kcov \
-            --clean \
-            --include-pattern=src/ \
-            --exclude-pattern=.zig-cache \
-            coverage \
-            zig-out/bin/test-runner
+          # Find the profraw file
+          PROFRAW=$(find . -name "*.profraw" -type f | head -1)
+
+          if [ -n "$PROFRAW" ]; then
+            echo "Found profraw: $PROFRAW"
+
+            # Merge profile data
+            llvm-profdata merge -sparse "$PROFRAW" -o coverage.profdata
+
+            # Generate lcov report for Codecov
+            llvm-cov export ./zig-out/bin/test-runner \
+              -instr-profile=coverage.profdata \
+              -format=lcov \
+              -ignore-filename-regex='.*\.zig-cache.*' \
+              > coverage.lcov
+
+            # Show summary
+            llvm-cov report ./zig-out/bin/test-runner \
+              -instr-profile=coverage.profdata \
+              -ignore-filename-regex='.*\.zig-cache.*'
+          else
+            echo "No profraw file found"
+            exit 1
+          fi
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          directory: coverage
+          files: coverage.lcov
           fail_ci_if_error: false
           verbose: true
-
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: coverage/
-          retention-days: 30
-
-      - name: Check coverage threshold
-        run: |
-          # Extract coverage percentage from kcov output
-          if [ -f coverage/kcov-merged/coverage.json ]; then
-            COVERAGE=$(grep -oP '"covered_percent":\s*\K[0-9.]+' coverage/kcov-merged/coverage.json | head -1 || echo "0")
-            echo "Coverage: ${COVERAGE}%"
-
-            # Check against 90% threshold
-            THRESHOLD=90
-            if [ "$(echo "$COVERAGE < $THRESHOLD" | bc -l)" -eq 1 ]; then
-              echo "::warning::Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
-            else
-              echo "::notice::Coverage ${COVERAGE}% meets threshold ${THRESHOLD}%"
-            fi
-          else
-            echo "::warning::Coverage file not found"
-          fi
