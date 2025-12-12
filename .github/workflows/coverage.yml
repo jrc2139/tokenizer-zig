@@ -19,10 +19,8 @@ jobs:
         with:
           version: 0.15.0
 
-      - name: Install kcov
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends kcov
+      - name: action-kcov
+        uses: sudo-bot/action-kcov@latest
 
       - name: Build test binary
         run: |
