@@ -1,5 +1,5 @@
 id: scqblt0nmsfe6lqyptok8zt9i72mxh2f6tcdu97yx6qq10cj
-name: tokenizer-zig
+name: tokenizer
 main: src/lib.zig
 license: MIT
 description: pure zig implementation of tokenizers
