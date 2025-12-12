@@ -510,3 +510,207 @@ test "integration: add special tokens to vocabulary" {
     try std.testing.expect(tokenizer.tokenToId("[MASK]") != null);
     try std.testing.expect(tokenizer.tokenToId("[NEW]") != null);
 }
+
+test "integration: full BERT pipeline with normalizer and pretokenizer" {
+    const allocator = std.testing.allocator;
+
+    // Complete BERT-style config with all components
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {
+        \\      "[PAD]": 0,
+        \\      "[UNK]": 1,
+        \\      "[CLS]": 2,
+        \\      "[SEP]": 3,
+        \\      "hello": 4,
+        \\      "world": 5,
+        \\      "test": 6,
+        \\      ",": 7,
+        \\      ".": 8,
+        \\      "!": 9
+        \\    },
+        \\    "unk_token": "[UNK]",
+        \\    "continuing_subword_prefix": "##"
+        \\  },
+        \\  "normalizer": {
+        \\    "type": "BertNormalizer",
+        \\    "lowercase": true,
+        \\    "strip_accents": true,
+        \\    "clean_text": true
+        \\  },
+        \\  "pre_tokenizer": {
+        \\    "type": "BertPreTokenizer"
+        \\  },
+        \\  "decoder": {
+        \\    "type": "WordPiece",
+        \\    "prefix": "##"
+        \\  },
+        \\  "added_tokens": [
+        \\    {"id": 2, "content": "[CLS]", "special": true},
+        \\    {"id": 3, "content": "[SEP]", "special": true}
+        \\  ]
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromJson(allocator, json_content);
+    defer tokenizer.deinit();
+
+    // Test with mixed case and punctuation - normalizer should lowercase
+    var encoding = try tokenizer.encode("Hello, World!", false);
+    defer encoding.deinit();
+
+    // Should tokenize: "hello", ",", "world", "!"
+    try std.testing.expectEqual(@as(usize, 4), encoding.ids.len);
+    try std.testing.expectEqual(@as(u32, 4), encoding.ids[0]); // "hello"
+    try std.testing.expectEqual(@as(u32, 7), encoding.ids[1]); // ","
+    try std.testing.expectEqual(@as(u32, 5), encoding.ids[2]); // "world"
+    try std.testing.expectEqual(@as(u32, 9), encoding.ids[3]); // "!"
+}
+
+test "integration: encode empty string" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {
+        \\      "[UNK]": 0,
+        \\      "test": 1
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromJson(allocator, json_content);
+    defer tokenizer.deinit();
+
+    var encoding = try tokenizer.encode("", false);
+    defer encoding.deinit();
+
+    // Empty input should produce empty encoding
+    try std.testing.expectEqual(@as(usize, 0), encoding.ids.len);
+    try std.testing.expectEqual(@as(usize, 0), encoding.tokens.len);
+}
+
+test "integration: decode empty ids" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {
+        \\      "[UNK]": 0,
+        \\      "test": 1
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromJson(allocator, json_content);
+    defer tokenizer.deinit();
+
+    const empty_ids = [_]u32{};
+    const decoded = try tokenizer.decode(&empty_ids, false);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualStrings("", decoded);
+}
+
+test "integration: unknown tokens mapped to UNK" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {
+        \\      "[UNK]": 0,
+        \\      "hello": 1
+        \\    },
+        \\    "unk_token": "[UNK]"
+        \\  }
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromJson(allocator, json_content);
+    defer tokenizer.deinit();
+
+    // "goodbye" is not in vocab, should map to [UNK]
+    var encoding = try tokenizer.encode("goodbye", false);
+    defer encoding.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), encoding.ids.len);
+    try std.testing.expectEqual(@as(u32, 0), encoding.ids[0]); // [UNK]
+}
+
+test "integration: subword tokenization" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {
+        \\      "[UNK]": 0,
+        \\      "play": 1,
+        \\      "##ing": 2,
+        \\      "##ed": 3
+        \\    },
+        \\    "unk_token": "[UNK]",
+        \\    "continuing_subword_prefix": "##"
+        \\  }
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromJson(allocator, json_content);
+    defer tokenizer.deinit();
+
+    // "playing" should be split into "play" + "##ing"
+    var encoding = try tokenizer.encode("playing", false);
+    defer encoding.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), encoding.ids.len);
+    try std.testing.expectEqual(@as(u32, 1), encoding.ids[0]); // "play"
+    try std.testing.expectEqual(@as(u32, 2), encoding.ids[1]); // "##ing"
+}
+
+test "integration: multiple words with subword splits" {
+    const allocator = std.testing.allocator;
+
+    const json_content =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {
+        \\      "[UNK]": 0,
+        \\      "un": 1,
+        \\      "##believ": 2,
+        \\      "##able": 3,
+        \\      "story": 4
+        \\    },
+        \\    "unk_token": "[UNK]",
+        \\    "continuing_subword_prefix": "##"
+        \\  },
+        \\  "pre_tokenizer": {
+        \\    "type": "Whitespace"
+        \\  }
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromJson(allocator, json_content);
+    defer tokenizer.deinit();
+
+    // "unbelievable story" => "un" + "##believ" + "##able" + "story"
+    var encoding = try tokenizer.encode("unbelievable story", false);
+    defer encoding.deinit();
+
+    try std.testing.expectEqual(@as(usize, 4), encoding.ids.len);
+    try std.testing.expectEqual(@as(u32, 1), encoding.ids[0]); // "un"
+    try std.testing.expectEqual(@as(u32, 2), encoding.ids[1]); // "##believ"
+    try std.testing.expectEqual(@as(u32, 3), encoding.ids[2]); // "##able"
+    try std.testing.expectEqual(@as(u32, 4), encoding.ids[3]); // "story"
+}
