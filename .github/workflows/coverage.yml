@@ -19,48 +19,20 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Run tests with coverage
+      - name: Build test binary
         run: |
-          zig test src/lib.zig \
-            -fcode-coverage \
-            --emit-bin=zig-out/bin/test-runner \
-            --emit-pdb=zig-out/bin/ \
-            2>&1 || true
+          mkdir -p zig-out/bin
+          zig test src/lib.zig --test-no-exec -femit-bin=zig-out/bin/test-runner
 
-          # Run the binary to generate profraw data
-          ./zig-out/bin/test-runner 2>&1 || true
-
-      - name: Generate coverage report
-        run: |
-          # Find the profraw file
-          PROFRAW=$(find . -name "*.profraw" -type f | head -1)
-
-          if [ -n "$PROFRAW" ]; then
-            echo "Found profraw: $PROFRAW"
-
-            # Merge profile data
-            llvm-profdata merge -sparse "$PROFRAW" -o coverage.profdata
-
-            # Generate lcov report for Codecov
-            llvm-cov export ./zig-out/bin/test-runner \
-              -instr-profile=coverage.profdata \
-              -format=lcov \
-              -ignore-filename-regex='.*\.zig-cache.*' \
-              > coverage.lcov
-
-            # Show summary
-            llvm-cov report ./zig-out/bin/test-runner \
-              -instr-profile=coverage.profdata \
-              -ignore-filename-regex='.*\.zig-cache.*'
-          else
-            echo "No profraw file found"
-            exit 1
-          fi
+      - name: Run kcov coverage
+        uses: sudo-bot/action-kcov@latest
+        with:
+          cli-args: "--clean --include-pattern=src/ --exclude-pattern=.zig-cache coverage zig-out/bin/test-runner"
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage.lcov
+          directory: coverage
           fail_ci_if_error: false
           verbose: true
