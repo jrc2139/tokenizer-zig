@@ -7,18 +7,21 @@ on:
     branches: [main]
   workflow_dispatch:
 
+env:
+  ZIG_VERSION: "0.15.2"
+
 jobs:
   format:
     name: Format Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.0
+          version: ${{ env.ZIG_VERSION }}
 
       - name: Check formatting
         run: zig fmt --check src/ examples/
@@ -29,12 +32,12 @@ jobs:
     needs: format
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.0
+          version: ${{ env.ZIG_VERSION }}
 
       - name: Check compilation
         run: zig build check
@@ -49,12 +52,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.0
+          version: ${{ env.ZIG_VERSION }}
 
       - name: Run tests
         run: zig build test
