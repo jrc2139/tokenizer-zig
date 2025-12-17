@@ -1,10 +1,20 @@
 //! BPE (Byte Pair Encoding) tokenization model
 //!
 //! BPE is used by GPT-2, RoBERTa, and many other models.
+//!
+//! This module provides two implementations:
+//! - `BPE`: Original implementation with allocations per tokenize() call
+//! - `FastBPE`: Zero-allocation implementation using pre-allocated arenas
 
 const std = @import("std");
 const model = @import("model.zig");
 const Token = @import("../token.zig").Token;
+const SpanToken = @import("../token.zig").SpanToken;
+const arena_mod = @import("../arena.zig");
+const BPESymbol = arena_mod.BPESymbol;
+const BPEPairHeap = arena_mod.BPEPairHeap;
+const TokenizerArena = arena_mod.TokenizerArena;
+const SpanEncoding = @import("../encoding.zig").SpanEncoding;
 
 /// A pair of token IDs for BPE merging
 pub const Pair = struct {
@@ -255,6 +265,180 @@ pub const BPE = struct {
     /// Get vocabulary size
     pub fn getVocabSize(self: *const Self) usize {
         return self.vocab.count();
+    }
+
+    // ========================================================================
+    // Fast Zero-Allocation Tokenization (O(n log n) algorithm)
+    // ========================================================================
+
+    /// Tokenize using linked-list + priority heap algorithm.
+    /// Complexity: O(n log n) instead of O(k * n²)
+    /// Zero allocations: uses pre-allocated arena buffers.
+    ///
+    /// Algorithm:
+    /// 1. Initialize symbol linked list from input characters
+    /// 2. Build priority heap of all adjacent pairs with merge ranks
+    /// 3. Pop best (lowest rank) pair, merge symbols (O(1) with linked list)
+    /// 4. Add new pairs created by merge to heap (O(log n))
+    /// 5. Repeat until no more merges possible
+    /// 6. Traverse linked list to collect final tokens
+    pub fn tokenizeFast(self: *Self, arena: *TokenizerArena, sequence: []const u8) void {
+        if (sequence.len == 0) return;
+
+        const symbols = arena.bpe_symbols;
+        var symbol_count: u16 = 0;
+        const head: u16 = 0;
+
+        // Step 1: Initialize symbol linked list from input characters
+        var byte_idx: u32 = 0;
+        var iter = std.unicode.Utf8Iterator{ .bytes = sequence, .i = 0 };
+
+        while (iter.nextCodepointSlice()) |char_slice| {
+            const char_len: u32 = @intCast(char_slice.len);
+            const char_end = byte_idx + char_len;
+
+            // Look up character in vocab
+            const char_id = self.vocab.get(char_slice) orelse blk: {
+                // Unknown character - use UNK token if available
+                if (self.unk_token) |unk| {
+                    break :blk self.vocab.get(unk) orelse {
+                        byte_idx = char_end;
+                        continue; // Skip if no UNK
+                    };
+                }
+                byte_idx = char_end;
+                continue; // Skip unknown char
+            };
+
+            // Add symbol to linked list
+            const idx = symbol_count;
+            symbols[idx] = .{
+                .id = char_id,
+                .start = byte_idx,
+                .end = char_end,
+                .prev = if (idx == 0) BPESymbol.SENTINEL else idx - 1,
+                .next = BPESymbol.SENTINEL,
+            };
+
+            // Link previous symbol to this one
+            if (idx > 0) {
+                symbols[idx - 1].next = idx;
+            }
+
+            symbol_count += 1;
+            byte_idx = char_end;
+        }
+
+        if (symbol_count == 0) return;
+        if (symbol_count == 1) {
+            // Single symbol - just add it
+            arena.encoding.append(SpanToken.init(
+                symbols[0].id,
+                symbols[0].start,
+                symbols[0].end,
+            ));
+            return;
+        }
+
+        // Step 2: Build priority heap of all adjacent pairs
+        arena.bpe_heap.reset();
+        var idx: u16 = head;
+        while (symbols[idx].next != BPESymbol.SENTINEL) {
+            const next_idx = symbols[idx].next;
+            const pair = Pair{ .first = symbols[idx].id, .second = symbols[next_idx].id };
+
+            if (self.merges.get(pair.hash())) |pair_val| {
+                arena.bpe_heap.insert(.{
+                    .left_idx = idx,
+                    .right_idx = next_idx,
+                    .rank = pair_val.rank,
+                });
+            }
+            idx = next_idx;
+        }
+
+        // Step 3-4: Process merges in priority order
+        while (arena.bpe_heap.pop()) |best| {
+            const left = &symbols[best.left_idx];
+            const right = &symbols[best.right_idx];
+
+            // Skip if either symbol was already merged (stale entry)
+            if (left.next != best.right_idx) continue;
+            if (right.isRemoved()) continue;
+
+            // Get merge result
+            const pair = Pair{ .first = left.id, .second = right.id };
+            const pair_val = self.merges.get(pair.hash()) orelse continue;
+
+            // Merge: update left symbol, remove right from list
+            left.id = pair_val.new_id;
+            left.end = right.end;
+            left.next = right.next;
+
+            // Update next symbol's prev pointer
+            if (right.next != BPESymbol.SENTINEL) {
+                symbols[right.next].prev = best.left_idx;
+            }
+
+            // Mark right as removed
+            right.markRemoved();
+
+            // Add new pairs to heap
+            // New pair: prev <-> merged_left
+            if (left.prev != BPESymbol.SENTINEL) {
+                const prev_sym = &symbols[left.prev];
+                const new_pair = Pair{ .first = prev_sym.id, .second = left.id };
+                if (self.merges.get(new_pair.hash())) |m| {
+                    arena.bpe_heap.insert(.{
+                        .left_idx = left.prev,
+                        .right_idx = best.left_idx,
+                        .rank = m.rank,
+                    });
+                }
+            }
+
+            // New pair: merged_left <-> next
+            if (left.next != BPESymbol.SENTINEL) {
+                const next_sym = &symbols[left.next];
+                const new_pair = Pair{ .first = left.id, .second = next_sym.id };
+                if (self.merges.get(new_pair.hash())) |m| {
+                    arena.bpe_heap.insert(.{
+                        .left_idx = best.left_idx,
+                        .right_idx = left.next,
+                        .rank = m.rank,
+                    });
+                }
+            }
+        }
+
+        // Step 5: Traverse linked list to collect final tokens
+        idx = head;
+        while (idx != BPESymbol.SENTINEL) {
+            const sym = &symbols[idx];
+            if (!sym.isRemoved()) {
+                arena.encoding.append(SpanToken.init(sym.id, sym.start, sym.end));
+            }
+            idx = sym.next;
+        }
+    }
+
+    /// Tokenize a word and append results to encoding (zero-alloc wrapper)
+    pub fn tokenizeWord(self: *Self, arena: *TokenizerArena, word_start: u32, word_end: u32) void {
+        const sequence = arena.encoding.input[word_start..word_end];
+        if (sequence.len == 0) return;
+
+        // Adjust offsets in the result
+        const start_len = arena.encoding.len;
+        self.tokenizeFast(arena, sequence);
+
+        // Adjust offsets to be relative to original input
+        var i: u32 = start_len;
+        while (i < arena.encoding.len) : (i += 1) {
+            arena.encoding.tokens[i].start += word_start;
+            arena.encoding.tokens[i].end += word_start;
+            arena.encoding.offsets[i].start += word_start;
+            arena.encoding.offsets[i].end += word_start;
+        }
     }
 };
 
@@ -509,4 +693,167 @@ test "bpe pair hash equality" {
     try std.testing.expectEqual(pair1.hash(), pair2.hash());
     // Different pairs have different hash
     try std.testing.expect(pair1.hash() != pair3.hash());
+}
+
+// ============================================================================
+// Fast BPE (Zero-Allocation) Unit Tests
+// ============================================================================
+
+test "bpe tokenizeFast single word with merges" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{ .unk_token = "<unk>" });
+    defer bpe.deinit();
+
+    var arena = try TokenizerArena.init(allocator, .{});
+    defer arena.deinit();
+
+    arena.reset("hello");
+    bpe.tokenizeFast(&arena, "hello");
+
+    // "hello" should be merged into a single token
+    try std.testing.expectEqual(@as(u32, 1), arena.encoding.len);
+    try std.testing.expectEqual(@as(u32, 14), arena.encoding.getIds()[0]);
+}
+
+test "bpe tokenizeFast empty string" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    var arena = try TokenizerArena.init(allocator, .{});
+    defer arena.deinit();
+
+    arena.reset("");
+    bpe.tokenizeFast(&arena, "");
+
+    try std.testing.expectEqual(@as(u32, 0), arena.encoding.len);
+}
+
+test "bpe tokenizeFast single char" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    var arena = try TokenizerArena.init(allocator, .{});
+    defer arena.deinit();
+
+    arena.reset("h");
+    bpe.tokenizeFast(&arena, "h");
+
+    try std.testing.expectEqual(@as(u32, 1), arena.encoding.len);
+    try std.testing.expectEqual(@as(u32, 0), arena.encoding.getIds()[0]);
+}
+
+test "bpe tokenizeFast offsets preserved" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    var arena = try TokenizerArena.init(allocator, .{});
+    defer arena.deinit();
+
+    arena.reset("hello");
+    bpe.tokenizeFast(&arena, "hello");
+
+    // "hello" merged to single token spanning full word
+    const offsets = arena.encoding.getOffsets();
+    try std.testing.expectEqual(@as(u32, 0), offsets[0].start);
+    try std.testing.expectEqual(@as(u32, 5), offsets[0].end);
+}
+
+test "bpe tokenizeFast no merges" {
+    const allocator = std.testing.allocator;
+
+    // Create vocab with chars but no merges
+    var vocab = std.StringHashMapUnmanaged(u32){};
+    try vocab.put(allocator, try allocator.dupe(u8, "a"), 0);
+    try vocab.put(allocator, try allocator.dupe(u8, "b"), 1);
+    try vocab.put(allocator, try allocator.dupe(u8, "c"), 2);
+
+    const merges = std.AutoHashMapUnmanaged(u64, PairVal){};
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    var arena = try TokenizerArena.init(allocator, .{});
+    defer arena.deinit();
+
+    arena.reset("abc");
+    bpe.tokenizeFast(&arena, "abc");
+
+    // Without merges, each char stays separate
+    try std.testing.expectEqual(@as(u32, 3), arena.encoding.len);
+    const ids = arena.encoding.getIds();
+    try std.testing.expectEqual(@as(u32, 0), ids[0]); // "a"
+    try std.testing.expectEqual(@as(u32, 1), ids[1]); // "b"
+    try std.testing.expectEqual(@as(u32, 2), ids[2]); // "c"
+}
+
+test "bpe tokenizeFast matches original" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{ .unk_token = "<unk>" });
+    defer bpe.deinit();
+
+    // Test with original algorithm
+    const original_tokens = try bpe.tokenize(allocator, "hello");
+    defer allocator.free(original_tokens);
+
+    // Test with fast algorithm
+    var arena = try TokenizerArena.init(allocator, .{});
+    defer arena.deinit();
+
+    arena.reset("hello");
+    bpe.tokenizeFast(&arena, "hello");
+
+    // Should produce same results
+    try std.testing.expectEqual(original_tokens.len, arena.encoding.len);
+    for (original_tokens, 0..) |tok, i| {
+        try std.testing.expectEqual(tok.id, arena.encoding.getIds()[i]);
+        try std.testing.expectEqual(tok.offset.start, arena.encoding.getOffsets()[i].start);
+        try std.testing.expectEqual(tok.offset.end, arena.encoding.getOffsets()[i].end);
+    }
+}
+
+test "bpe tokenizeFast arena reuse" {
+    const allocator = std.testing.allocator;
+    const data = try createTestBPEVocab(allocator);
+    const vocab = data.vocab;
+    const merges = data.merges;
+
+    var bpe = try BPE.init(allocator, vocab, merges, .{});
+    defer bpe.deinit();
+
+    var arena = try TokenizerArena.init(allocator, .{});
+    defer arena.deinit();
+
+    // First tokenization
+    arena.reset("hello");
+    bpe.tokenizeFast(&arena, "hello");
+    try std.testing.expectEqual(@as(u32, 1), arena.encoding.len);
+
+    // Reset and reuse - no allocation
+    arena.reset("he");
+    bpe.tokenizeFast(&arena, "he");
+    try std.testing.expectEqual(@as(u32, 1), arena.encoding.len);
+    try std.testing.expectEqual(@as(u32, 9), arena.encoding.getIds()[0]); // "he" merged
 }

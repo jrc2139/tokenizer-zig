@@ -6,6 +6,8 @@
 const std = @import("std");
 const model = @import("model.zig");
 const Token = @import("../token.zig").Token;
+const SpanToken = @import("../token.zig").SpanToken;
+const TokenizerArena = @import("../arena.zig").TokenizerArena;
 
 /// WordPiece tokenization model
 pub const WordPiece = struct {
@@ -217,6 +219,83 @@ pub const WordPiece = struct {
         }
 
         return try tokens.toOwnedSlice(allocator);
+    }
+
+    /// Zero-allocation tokenization using arena buffers.
+    /// Writes SpanTokens directly to arena.encoding.
+    ///
+    /// Algorithm: Greedy longest-match
+    /// 1. Start from beginning of word
+    /// 2. Find longest substring in vocabulary
+    /// 3. For non-first tokens, prepend continuing_subword_prefix
+    /// 4. Repeat until end of word
+    /// 5. If any position fails, output single UNK token
+    pub fn tokenizeFast(self: *Self, arena: *TokenizerArena, sequence: []const u8) void {
+        if (sequence.len == 0) return;
+
+        const chars = sequence;
+        const char_len = chars.len;
+
+        // If word is too long, return UNK
+        if (char_len > self.max_input_chars_per_word) {
+            const unk_id = self.vocab.get(self.unk_token) orelse return;
+            arena.encoding.append(SpanToken.init(unk_id, 0, @intCast(char_len)));
+            return;
+        }
+
+        // Track tokens we've found (we may need to discard if we hit a bad segment)
+        const start_len = arena.encoding.len;
+        var is_bad = false;
+        var start: u32 = 0;
+
+        while (start < char_len) {
+            var end: u32 = @intCast(char_len);
+            var cur_id: ?u32 = null;
+            var matched_end: u32 = 0;
+
+            while (start < end) {
+                var substr_buf: [512]u8 = undefined;
+                var substr: []const u8 = undefined;
+
+                if (start > 0) {
+                    // Add continuing subword prefix
+                    const prefix_len = self.continuing_subword_prefix.len;
+                    const word_len = end - start;
+                    if (prefix_len + word_len > substr_buf.len) {
+                        end -= 1;
+                        continue;
+                    }
+                    @memcpy(substr_buf[0..prefix_len], self.continuing_subword_prefix);
+                    @memcpy(substr_buf[prefix_len .. prefix_len + word_len], chars[start..end]);
+                    substr = substr_buf[0 .. prefix_len + word_len];
+                } else {
+                    substr = chars[start..end];
+                }
+
+                if (self.vocab.get(substr)) |id| {
+                    cur_id = id;
+                    matched_end = end;
+                    break;
+                }
+                end -= 1;
+            }
+
+            if (cur_id == null) {
+                is_bad = true;
+                break;
+            }
+
+            // Append token with correct offsets
+            arena.encoding.append(SpanToken.init(cur_id.?, start, matched_end));
+            start = matched_end;
+        }
+
+        if (is_bad) {
+            // Rollback any tokens we added and output single UNK
+            arena.encoding.len = start_len;
+            const unk_id = self.vocab.get(self.unk_token) orelse return;
+            arena.encoding.append(SpanToken.init(unk_id, 0, @intCast(char_len)));
+        }
     }
 };
 

@@ -3,6 +3,229 @@
 const std = @import("std");
 const lib = @import("lib.zig");
 const Token = @import("token.zig").Token;
+const SpanToken = @import("token.zig").SpanToken;
+const SpanTokenFlags = @import("token.zig").SpanTokenFlags;
+
+// ============================================================================
+// SpanEncoding - Zero-Allocation Encoding Container
+// ============================================================================
+
+/// Pre-allocated encoding container that enables zero-allocation tokenization.
+/// Stores span tokens (offsets into input) rather than copied strings.
+/// All arrays are pre-allocated at init time and reused across encode() calls.
+pub const SpanEncoding = struct {
+    /// Reference to original input text (borrowed, not owned)
+    input: []const u8,
+
+    /// Pre-allocated span token buffer
+    tokens: []SpanToken,
+
+    /// Current number of tokens
+    len: u32,
+
+    /// Maximum capacity
+    capacity: u32,
+
+    /// SoA arrays for ML framework compatibility (views into pre-allocated buffer)
+    /// These are separate arrays for efficient export to ML frameworks
+    ids: []u32,
+    attention_mask: []u32,
+    type_ids: []u32,
+    offsets: []lib.Offset,
+
+    const Self = @This();
+
+    /// Initialize SpanEncoding with pre-allocated buffers.
+    /// This is the only allocation point - after this, encode() is zero-alloc.
+    pub fn init(allocator: std.mem.Allocator, max_tokens: u32) !Self {
+        const cap = max_tokens;
+
+        const tokens = try allocator.alloc(SpanToken, cap);
+        errdefer allocator.free(tokens);
+
+        const ids = try allocator.alloc(u32, cap);
+        errdefer allocator.free(ids);
+
+        const attention_mask = try allocator.alloc(u32, cap);
+        errdefer allocator.free(attention_mask);
+
+        const type_ids = try allocator.alloc(u32, cap);
+        errdefer allocator.free(type_ids);
+
+        const offsets = try allocator.alloc(lib.Offset, cap);
+        errdefer allocator.free(offsets);
+
+        return .{
+            .input = &.{},
+            .tokens = tokens,
+            .len = 0,
+            .capacity = cap,
+            .ids = ids,
+            .attention_mask = attention_mask,
+            .type_ids = type_ids,
+            .offsets = offsets,
+        };
+    }
+
+    /// Free all pre-allocated buffers
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        allocator.free(self.tokens);
+        allocator.free(self.ids);
+        allocator.free(self.attention_mask);
+        allocator.free(self.type_ids);
+        allocator.free(self.offsets);
+    }
+
+    /// Reset for reuse with new input (O(1), no allocation)
+    pub fn reset(self: *Self, new_input: []const u8) void {
+        self.input = new_input;
+        self.len = 0;
+    }
+
+    /// Append a token (inline for hot path performance)
+    pub inline fn append(self: *Self, token: SpanToken) void {
+        std.debug.assert(self.len < self.capacity);
+        const i = self.len;
+        self.tokens[i] = token;
+        self.ids[i] = token.id;
+        self.attention_mask[i] = if (token.flags.is_padding) 0 else 1;
+        self.type_ids[i] = token.type_id;
+        self.offsets[i] = lib.Offset.init(token.start, token.end);
+        self.len = i + 1;
+    }
+
+    /// Append a token with bounds checking, returns false if full
+    pub fn tryAppend(self: *Self, token: SpanToken) bool {
+        if (self.len >= self.capacity) return false;
+        self.append(token);
+        return true;
+    }
+
+    /// Get token string on demand (zero-copy slice into original input)
+    pub fn getTokenStr(self: *const Self, index: usize) []const u8 {
+        const tok = self.tokens[index];
+        if (tok.flags.is_padding or tok.flags.is_special) {
+            // Special/padding tokens may not have valid input offsets
+            return "";
+        }
+        return self.input[tok.start..tok.end];
+    }
+
+    /// Get current token count
+    pub fn length(self: *const Self) usize {
+        return self.len;
+    }
+
+    /// Check if empty
+    pub fn isEmpty(self: *const Self) bool {
+        return self.len == 0;
+    }
+
+    /// Get IDs slice (active portion only)
+    pub fn getIds(self: *const Self) []const u32 {
+        return self.ids[0..self.len];
+    }
+
+    /// Get attention mask slice
+    pub fn getAttentionMask(self: *const Self) []const u32 {
+        return self.attention_mask[0..self.len];
+    }
+
+    /// Get type IDs slice
+    pub fn getTypeIds(self: *const Self) []const u32 {
+        return self.type_ids[0..self.len];
+    }
+
+    /// Get offsets slice
+    pub fn getOffsets(self: *const Self) []const lib.Offset {
+        return self.offsets[0..self.len];
+    }
+
+    /// Get tokens slice
+    pub fn getTokens(self: *const Self) []const SpanToken {
+        return self.tokens[0..self.len];
+    }
+
+    /// Truncate to max_length (O(1), just adjusts len)
+    pub fn truncate(self: *Self, max_length: u32) void {
+        if (self.len > max_length) {
+            self.len = max_length;
+        }
+    }
+
+    /// Pad to target_length with padding tokens
+    /// Note: This still doesn't allocate - uses pre-allocated buffer
+    pub fn pad(self: *Self, target_length: u32, pad_id: u32) void {
+        while (self.len < target_length and self.len < self.capacity) {
+            self.append(SpanToken.initPadding(pad_id));
+        }
+    }
+
+    /// Convert to legacy Encoding (allocates)
+    /// Use this when you need HuggingFace-compatible output
+    pub fn toEncoding(self: *const Self, allocator: std.mem.Allocator) !Encoding {
+        const n = self.len;
+        if (n == 0) {
+            return Encoding.empty(allocator);
+        }
+
+        const ids = try allocator.alloc(u32, n);
+        errdefer allocator.free(ids);
+        @memcpy(ids, self.ids[0..n]);
+
+        const type_ids_out = try allocator.alloc(u32, n);
+        errdefer allocator.free(type_ids_out);
+        @memcpy(type_ids_out, self.type_ids[0..n]);
+
+        const token_strs = try allocator.alloc([]const u8, n);
+        errdefer {
+            for (token_strs[0..n]) |str| {
+                if (str.len > 0) allocator.free(str);
+            }
+            allocator.free(token_strs);
+        }
+
+        for (0..n) |i| {
+            const tok = self.tokens[i];
+            if (tok.flags.is_padding) {
+                token_strs[i] = try allocator.dupe(u8, "[PAD]");
+            } else {
+                token_strs[i] = try allocator.dupe(u8, self.input[tok.start..tok.end]);
+            }
+        }
+
+        const offsets_out = try allocator.alloc(lib.Offset, n);
+        errdefer allocator.free(offsets_out);
+        @memcpy(offsets_out, self.offsets[0..n]);
+
+        const special_mask = try allocator.alloc(u32, n);
+        errdefer allocator.free(special_mask);
+        for (0..n) |i| {
+            special_mask[i] = if (self.tokens[i].flags.is_special) 1 else 0;
+        }
+
+        const attention_out = try allocator.alloc(u32, n);
+        errdefer allocator.free(attention_out);
+        @memcpy(attention_out, self.attention_mask[0..n]);
+
+        return .{
+            .allocator = allocator,
+            .ids = ids,
+            .type_ids = type_ids_out,
+            .tokens = token_strs,
+            .offsets = offsets_out,
+            .special_token_mask = special_mask,
+            .attention_mask = attention_out,
+            .words = null,
+            .overflowing = &.{},
+            .owns_token_strs = true,
+        };
+    }
+};
+
+// ============================================================================
+// Encoding - Original Implementation (Backward Compatibility)
+// ============================================================================
 
 /// Encoding represents the complete output of tokenization
 pub const Encoding = struct {
@@ -640,4 +863,177 @@ test "encoding special token mask" {
     // Regular tokens have special_token_mask = 0
     try std.testing.expectEqual(@as(u32, 0), enc.special_token_mask[0]);
     try std.testing.expectEqual(@as(u32, 0), enc.special_token_mask[1]);
+}
+
+// ============================================================================
+// SpanEncoding Unit Tests
+// ============================================================================
+
+test "SpanEncoding init and deinit" {
+    const allocator = std.testing.allocator;
+
+    var enc = try SpanEncoding.init(allocator, 512);
+    defer enc.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), enc.len);
+    try std.testing.expectEqual(@as(u32, 512), enc.capacity);
+    try std.testing.expect(enc.isEmpty());
+}
+
+test "SpanEncoding append and getIds" {
+    const allocator = std.testing.allocator;
+
+    var enc = try SpanEncoding.init(allocator, 512);
+    defer enc.deinit(allocator);
+
+    const input = "hello world";
+    enc.reset(input);
+
+    enc.append(SpanToken.init(100, 0, 5)); // "hello"
+    enc.append(SpanToken.init(200, 6, 11)); // "world"
+
+    try std.testing.expectEqual(@as(u32, 2), enc.len);
+    try std.testing.expect(!enc.isEmpty());
+
+    const ids = enc.getIds();
+    try std.testing.expectEqual(@as(usize, 2), ids.len);
+    try std.testing.expectEqual(@as(u32, 100), ids[0]);
+    try std.testing.expectEqual(@as(u32, 200), ids[1]);
+}
+
+test "SpanEncoding getTokenStr zero-copy" {
+    const allocator = std.testing.allocator;
+
+    var enc = try SpanEncoding.init(allocator, 512);
+    defer enc.deinit(allocator);
+
+    const input = "hello world";
+    enc.reset(input);
+
+    enc.append(SpanToken.init(1, 0, 5));
+    enc.append(SpanToken.init(2, 6, 11));
+
+    // Zero-copy: getTokenStr returns slice into original input
+    try std.testing.expectEqualStrings("hello", enc.getTokenStr(0));
+    try std.testing.expectEqualStrings("world", enc.getTokenStr(1));
+
+    // Verify it's actually pointing to the same memory
+    try std.testing.expectEqual(@intFromPtr(input.ptr), @intFromPtr(enc.getTokenStr(0).ptr));
+}
+
+test "SpanEncoding reset reuses buffer" {
+    const allocator = std.testing.allocator;
+
+    var enc = try SpanEncoding.init(allocator, 512);
+    defer enc.deinit(allocator);
+
+    // First use
+    enc.reset("hello");
+    enc.append(SpanToken.init(1, 0, 5));
+    try std.testing.expectEqual(@as(u32, 1), enc.len);
+
+    // Reset and reuse - no allocation
+    enc.reset("world");
+    try std.testing.expectEqual(@as(u32, 0), enc.len);
+    enc.append(SpanToken.init(2, 0, 5));
+    try std.testing.expectEqual(@as(u32, 1), enc.len);
+}
+
+test "SpanEncoding attention mask" {
+    const allocator = std.testing.allocator;
+
+    var enc = try SpanEncoding.init(allocator, 512);
+    defer enc.deinit(allocator);
+
+    enc.reset("test");
+    enc.append(SpanToken.init(1, 0, 4));
+    enc.append(SpanToken.initPadding(0));
+
+    const mask = enc.getAttentionMask();
+    try std.testing.expectEqual(@as(u32, 1), mask[0]); // real token
+    try std.testing.expectEqual(@as(u32, 0), mask[1]); // padding
+}
+
+test "SpanEncoding truncate" {
+    const allocator = std.testing.allocator;
+
+    var enc = try SpanEncoding.init(allocator, 512);
+    defer enc.deinit(allocator);
+
+    enc.reset("abc");
+    enc.append(SpanToken.init(1, 0, 1));
+    enc.append(SpanToken.init(2, 1, 2));
+    enc.append(SpanToken.init(3, 2, 3));
+
+    try std.testing.expectEqual(@as(u32, 3), enc.len);
+
+    enc.truncate(2);
+    try std.testing.expectEqual(@as(u32, 2), enc.len);
+
+    const ids = enc.getIds();
+    try std.testing.expectEqual(@as(usize, 2), ids.len);
+}
+
+test "SpanEncoding pad" {
+    const allocator = std.testing.allocator;
+
+    var enc = try SpanEncoding.init(allocator, 512);
+    defer enc.deinit(allocator);
+
+    enc.reset("ab");
+    enc.append(SpanToken.init(1, 0, 1));
+    enc.append(SpanToken.init(2, 1, 2));
+
+    enc.pad(5, 0); // pad to length 5 with pad_id=0
+
+    try std.testing.expectEqual(@as(u32, 5), enc.len);
+
+    const ids = enc.getIds();
+    try std.testing.expectEqual(@as(u32, 1), ids[0]);
+    try std.testing.expectEqual(@as(u32, 2), ids[1]);
+    try std.testing.expectEqual(@as(u32, 0), ids[2]); // padding
+    try std.testing.expectEqual(@as(u32, 0), ids[3]); // padding
+    try std.testing.expectEqual(@as(u32, 0), ids[4]); // padding
+
+    // Check attention mask
+    const mask = enc.getAttentionMask();
+    try std.testing.expectEqual(@as(u32, 1), mask[0]);
+    try std.testing.expectEqual(@as(u32, 1), mask[1]);
+    try std.testing.expectEqual(@as(u32, 0), mask[2]);
+}
+
+test "SpanEncoding toEncoding conversion" {
+    const allocator = std.testing.allocator;
+
+    var span_enc = try SpanEncoding.init(allocator, 512);
+    defer span_enc.deinit(allocator);
+
+    const input = "hello world";
+    span_enc.reset(input);
+    span_enc.append(SpanToken.init(100, 0, 5));
+    span_enc.append(SpanToken.init(200, 6, 11));
+
+    var enc = try span_enc.toEncoding(allocator);
+    defer enc.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), enc.len());
+    try std.testing.expectEqual(@as(u32, 100), enc.ids[0]);
+    try std.testing.expectEqual(@as(u32, 200), enc.ids[1]);
+    try std.testing.expectEqualStrings("hello", enc.tokens[0]);
+    try std.testing.expectEqualStrings("world", enc.tokens[1]);
+}
+
+test "SpanEncoding tryAppend bounds check" {
+    const allocator = std.testing.allocator;
+
+    var enc = try SpanEncoding.init(allocator, 2); // small capacity
+    defer enc.deinit(allocator);
+
+    enc.reset("abc");
+
+    try std.testing.expect(enc.tryAppend(SpanToken.init(1, 0, 1)));
+    try std.testing.expect(enc.tryAppend(SpanToken.init(2, 1, 2)));
+    try std.testing.expect(!enc.tryAppend(SpanToken.init(3, 2, 3))); // should fail
+
+    try std.testing.expectEqual(@as(u32, 2), enc.len);
 }
