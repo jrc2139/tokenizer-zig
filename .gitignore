@@ -8,10 +8,7 @@ build/
 build-*/
 docgen_tmp/
 deps/
-.zigmod
-deps.zig
 files.zig
-zigmod.lock
 
 # Coverage
 coverage/
