@@ -310,8 +310,12 @@ pub const BPE = struct {
                 continue; // Skip unknown char
             };
 
-            // Add symbol to linked list
+            // Add symbol to linked list (check bounds)
             const idx = symbol_count;
+            if (idx >= symbols.len) {
+                // Symbol buffer full, stop processing (truncate input)
+                break;
+            }
             symbols[idx] = .{
                 .id = char_id,
                 .start = byte_idx,
@@ -331,8 +335,8 @@ pub const BPE = struct {
 
         if (symbol_count == 0) return;
         if (symbol_count == 1) {
-            // Single symbol - just add it
-            arena.encoding.append(SpanToken.init(
+            // Single symbol - just add it (gracefully handle full buffer)
+            _ = arena.encoding.tryAppend(SpanToken.init(
                 symbols[0].id,
                 symbols[0].start,
                 symbols[0].end,
@@ -416,7 +420,10 @@ pub const BPE = struct {
         while (idx != BPESymbol.SENTINEL) {
             const sym = &symbols[idx];
             if (!sym.isRemoved()) {
-                arena.encoding.append(SpanToken.init(sym.id, sym.start, sym.end));
+                // Use tryAppend to gracefully handle buffer full (truncate long sequences)
+                if (!arena.encoding.tryAppend(SpanToken.init(sym.id, sym.start, sym.end))) {
+                    return; // Buffer full, stop collecting tokens
+                }
             }
             idx = sym.next;
         }

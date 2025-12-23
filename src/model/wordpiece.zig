@@ -239,7 +239,7 @@ pub const WordPiece = struct {
         // If word is too long, return UNK
         if (char_len > self.max_input_chars_per_word) {
             const unk_id = self.vocab.get(self.unk_token) orelse return;
-            arena.encoding.append(SpanToken.init(unk_id, 0, @intCast(char_len)));
+            _ = arena.encoding.tryAppend(SpanToken.init(unk_id, 0, @intCast(char_len)));
             return;
         }
 
@@ -285,8 +285,10 @@ pub const WordPiece = struct {
                 break;
             }
 
-            // Append token with correct offsets
-            arena.encoding.append(SpanToken.init(cur_id.?, start, matched_end));
+            // Append token with correct offsets (stop if buffer full)
+            if (!arena.encoding.tryAppend(SpanToken.init(cur_id.?, start, matched_end))) {
+                return; // Buffer full, truncate
+            }
             start = matched_end;
         }
 
@@ -294,7 +296,7 @@ pub const WordPiece = struct {
             // Rollback any tokens we added and output single UNK
             arena.encoding.len = start_len;
             const unk_id = self.vocab.get(self.unk_token) orelse return;
-            arena.encoding.append(SpanToken.init(unk_id, 0, @intCast(char_len)));
+            _ = arena.encoding.tryAppend(SpanToken.init(unk_id, 0, @intCast(char_len)));
         }
     }
 };

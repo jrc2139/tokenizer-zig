@@ -407,11 +407,13 @@ pub const FastTokenizer = struct {
                 defer allocator.free(tokens);
 
                 for (tokens) |token| {
-                    self.tokenizer_arena.encoding.append(SpanToken.init(
+                    if (!self.tokenizer_arena.encoding.tryAppend(SpanToken.init(
                         token.id,
                         token.offset.start + span[0],
                         token.offset.end + span[0],
-                    ));
+                    ))) {
+                        break; // Buffer full, stop adding tokens
+                    }
                 }
             }
         }
